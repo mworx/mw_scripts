@@ -218,7 +218,7 @@ fn_check_root
 fn_detect_os
 
 echo "Выберите режим установки:"
-echo "  1) Claude Code (Новый метод)"
+echo "  1) Claude Code"
 echo "  2) Docker + Docker Compose"
 echo "  3) Настройка Proxychains (только прокси)"
 echo -e "${C_CYAN}  4) VIBE CODING PACK (Claude + Docker + Tools + Proxy)${C_NC}"
