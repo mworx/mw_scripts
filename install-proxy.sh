@@ -1,14 +1,11 @@
 #!/bin/bash
 
 # ==============================================================================
-# Установщик MEDIA WORKS для Claude Code, Docker и VibeEnv (v5)
-# Поддержка: Ubuntu, Debian, Astra Linux, CentOS
-#
-# Логика v5:
-# - Новый установщик Claude (install.sh).
-# - Поддержка установки Docker + Docker Compose plugin.
-# - Режим "Vibe Coding Pack" (All-in-One).
-# - Интеграция с Proxychains для всех этапов.
+# Установщик MEDIA WORKS для Claude Code, Docker и VibeEnv (v6)
+# Исправления:
+# - Корректная обработка отказа от прокси (не включает proxychains, если IP пуст).
+# - Fix: set -o pipefail для отлова ошибок curl в пайпах.
+# - Fix: Проверка наличия binary после установки.
 # ==============================================================================
 
 # --- Цвета ---
@@ -22,10 +19,10 @@ C_NC='\033[0m'
 # --- Глобальные переменные ---
 PKG_MANAGER=""
 OS_TYPE=""
-IS_CENTOS7=false
 PROXY_IP=""
 PROXY_USER="proxyuser"
 PROXYCHAINS_CONF_FILE=""
+USE_PROXY_FLAG=false # Флаг: будем ли использовать прокси реально
 
 # ==============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -55,23 +52,14 @@ fn_check_root() {
 fn_detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        ID_LOWER=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
-        
-        if [[ $ID_LOWER == "ubuntu" || $ID_LOWER == "debian" || $ID_LOWER == "astra" || $ID_LOWER == "kali" ]]; then
-            OS_TYPE="debian_based"
+        if [[ "$ID_LIKE" == *"debian"* || "$ID" == "debian" || "$ID" == "ubuntu" ]]; then
             PKG_MANAGER="apt"
-        elif [[ $ID_LOWER == "centos" || $ID_LOWER == "rhel" || $ID_LOWER == "fedora" ]]; then
-            OS_TYPE="rhel_based"
+        elif [[ "$ID_LIKE" == *"rhel"* || "$ID" == "centos" || "$ID" == "fedora" ]]; then
             PKG_MANAGER="yum"
-            if [[ $ID_LOWER == "centos" && $VERSION_ID == "7" ]]; then
-                IS_CENTOS7=true
-                echo -e "${C_RED}ВНИМАНИЕ: CentOS 7 устарела. Новый Claude CLI может не работать из-за старой glibc.${C_NC}"
-            fi
         else
-            echo -e "${C_RED}Неподдерживаемая ОС: $ID${C_NC}"
-            exit 1
+            echo -e "${C_RED}Неподдерживаемая ОС. Попытка использовать apt...${C_NC}"
+            PKG_MANAGER="apt"
         fi
-        echo -e "ОС: ${C_GREEN}$PRETTY_NAME${C_NC} ($PKG_MANAGER)"
     else
         echo -e "${C_RED}Не удалось определить ОС.${C_NC}"
         exit 1
@@ -88,12 +76,11 @@ fn_update_system() {
 }
 
 # ==============================================================================
-# УСТАНОВКА КОМПОНЕНТОВ
+# КОМПОНЕНТЫ
 # ==============================================================================
 
-# --- Proxychains ---
 fn_install_proxychains() {
-    echo -e "${C_YELLOW}--- Установка Proxychains ---${C_NC}"
+    echo -e "${C_YELLOW}--- Настройка Proxychains ---${C_NC}"
     
     # Установка пакета
     if ! command -v proxychains4 &> /dev/null; then
@@ -103,7 +90,6 @@ fn_install_proxychains() {
         elif [ "$PKG_MANAGER" == "yum" ]; then
             yum install -y epel-release
             yum install -y proxychains-ng
-            # Поиск конфига, так как в RHEL он может отличаться
             if [ -f /etc/proxychains4.conf ]; then PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"; else PROXYCHAINS_CONF_FILE="/etc/proxychains.conf"; fi
         fi
     else
@@ -112,12 +98,16 @@ fn_install_proxychains() {
     fi
 
     # Настройка
-    read -p "Введите IP SOCKS5 прокси (Enter чтобы пропустить настройку): " PROXY_IP
+    echo -e "${C_YELLOW}ВАЖНО: Для работы Claude в РФ прокси ОБЯЗАТЕЛЕН.${C_NC}"
+    read -p "Введите IP SOCKS5 прокси (Enter чтобы пропустить): " PROXY_IP
+    
     if [ ! -z "$PROXY_IP" ]; then
         read -sp "Введите пароль пользователя '$PROXY_USER': " PROXY_PASS
         echo
         
-        cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak"
+        # Бэкап
+        cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak" 2>/dev/null
+        
         cat << EOF > "$PROXYCHAINS_CONF_FILE"
 dynamic_chain
 quiet_mode
@@ -129,40 +119,34 @@ tcp_connect_time_out 8000
 socks5 $PROXY_IP 1080 $PROXY_USER $PROXY_PASS
 EOF
         echo -e "${C_GREEN}Proxychains настроен.${C_NC}"
+        USE_PROXY_FLAG=true
     else
-        echo "Настройка прокси пропущена."
+        echo -e "${C_RED}Настройка прокси пропущена. Установка Claude может не сработать (geo-block).${C_NC}"
+        USE_PROXY_FLAG=false
     fi
 }
 
-# --- Docker & Compose ---
 fn_install_docker() {
-    local prefix_cmd="$1"
     echo -e "${C_YELLOW}--- Установка Docker & Compose ---${C_NC}"
-    
     if command -v docker &> /dev/null; then
         echo "Docker уже установлен."
     else
-        echo "Загрузка скрипта установки Docker..."
-        # Используем официальный скрипт
-        $prefix_cmd curl -fsSL https://get.docker.com -o get-docker.sh
-        $prefix_cmd sh get-docker.sh
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
         rm get-docker.sh
         
         systemctl start docker
         systemctl enable docker
-        
-        # Добавляем текущего пользователя (не root, если скрипт запущен через sudo)
         REAL_USER=${SUDO_USER:-$USER}
         usermod -aG docker "$REAL_USER"
-        echo -e "${C_GREEN}Docker установлен. Пользователь $REAL_USER добавлен в группу docker.${C_NC}"
+        echo -e "${C_GREEN}Docker установлен.${C_NC}"
     fi
 }
 
-# --- Доп. инструменты (Vibe Pack) ---
 fn_install_tools() {
     local prefix_cmd="$1"
     echo -e "${C_YELLOW}--- Установка инструментов (ripgrep, fzf, utils) ---${C_NC}"
-    
+    # Если прокси не настроен, prefix_cmd будет пустым, пакеты пойдут напрямую
     if [ "$PKG_MANAGER" == "apt" ]; then
         $prefix_cmd apt install -y ripgrep fzf jq htop
     elif [ "$PKG_MANAGER" == "yum" ]; then
@@ -170,29 +154,28 @@ fn_install_tools() {
     fi
 }
 
-# --- Новый Claude Code ---
 fn_install_claude_new() {
     local prefix_cmd="$1"
-    echo -e "${C_YELLOW}--- Установка Claude Code (New Installer) ---${C_NC}"
+    echo -e "${C_YELLOW}--- Установка Claude Code ---${C_NC}"
     
-    # Проверка на существование
-    if command -v claude &> /dev/null; then
-        echo -e "${C_GREEN}Claude CLI уже установлен.${C_NC}"
-        return
-    fi
+    # Удаляем старый битый файл если есть
+    rm -f /root/.local/bin/claude 2>/dev/null
+    rm -f /home/${SUDO_USER:-$USER}/.local/bin/claude 2>/dev/null
 
-    echo "Запуск: curl https://claude.ai/install.sh | bash"
+    echo "Запуск установщика..."
     
-    # Хак для pipe через proxychains: создаем временный скрипт
     local tmp_install="/tmp/claude_inst.sh"
+    # set -o pipefail ВАЖЕН: если curl упадет, весь скрипт вернет ошибку
     echo '#!/bin/bash' > "$tmp_install"
+    echo 'set -e; set -o pipefail' >> "$tmp_install"
     echo 'curl -fsSL https://claude.ai/install.sh | bash' >> "$tmp_install"
     chmod +x "$tmp_install"
     
     if [ -n "$prefix_cmd" ]; then
-        echo "Установка через прокси..."
+        echo "Используем прокси: $prefix_cmd"
         $prefix_cmd "$tmp_install"
     else
+        echo "Установка НАПРЯМУЮ (без прокси). Может быть заблокировано."
         "$tmp_install"
     fi
     
@@ -200,17 +183,16 @@ fn_install_claude_new() {
     rm "$tmp_install"
     
     if [ $RET_CODE -eq 0 ]; then
-        echo -e "${C_GREEN}Claude успешно установлен.${C_NC}"
-        # Попытка добавить в PATH для текущей сессии
-        export PATH="$HOME/.local/bin:$PATH"
+        echo -e "${C_GREEN}Скрипт установки отработал успешно.${C_NC}"
     else
-        echo -e "${C_RED}Ошибка установки Claude.${C_NC}"
-        exit 1
+        echo -e "${C_RED}ОШИБКА: Не удалось скачать или установить Claude.${C_NC}"
+        echo "Возможные причины: нет прокси, неверный прокси, или сайт недоступен."
+        return 1
     fi
 }
 
 # ==============================================================================
-# МЕНЮ И ЛОГИКА
+# МЕНЮ
 # ==============================================================================
 
 fn_show_logo
@@ -218,52 +200,48 @@ fn_check_root
 fn_detect_os
 
 echo "Выберите режим установки:"
-echo "  1) Claude Code"
+echo "  1) Claude Code (Новый метод)"
 echo "  2) Docker + Docker Compose"
-echo "  3) Настройка Proxychains (только прокси)"
+echo "  3) Настройка Proxychains"
 echo -e "${C_CYAN}  4) VIBE CODING PACK (Claude + Docker + Tools + Proxy)${C_NC}"
 echo
 read -p "Ваш выбор: " CHOICE
 
-# Определяем префикс прокси заранее
 PREFIX=""
 
 case $CHOICE in
     1)
-        # Просто Claude. Спрашиваем про прокси, если нужно.
-        read -p "Использовать Proxychains? (y/n): " USE_PROXY
-        if [[ "$USE_PROXY" == "y" ]]; then
-            fn_install_proxychains
-            PREFIX="proxychains4"
-        fi
+        fn_install_proxychains
+        if [ "$USE_PROXY_FLAG" = true ]; then PREFIX="proxychains4"; fi
         fn_update_system
         fn_install_claude_new "$PREFIX"
         ;;
     2)
         fn_update_system
-        fn_install_docker "" # Docker обычно ставится без прокси (зеркала)
+        fn_install_docker
         ;;
     3)
-        fn_update_system
         fn_install_proxychains
         ;;
     4)
-        echo -e "${C_CYAN}>>> Запуск полной установки Vibe Coding Pack <<<${C_NC}"
+        echo -e "${C_CYAN}>>> Vibe Coding Pack <<<${C_NC}"
         fn_update_system
         
-        # 1. Сначала настраиваем прокси, так как остальные могут зависеть от него
+        # 1. Настройка прокси
         fn_install_proxychains
-        PREFIX="proxychains4"
+        if [ "$USE_PROXY_FLAG" = true ]; then 
+            PREFIX="proxychains4"
+        else
+            PREFIX=""
+        fi
         
-        # 2. Ставим утилиты (через прокси на всякий случай, если репо заблочены)
+        # 2. Инструменты (используем прокси только если он настроен)
         fn_install_tools "$PREFIX"
         
-        # 3. Ставим Docker (пробуем напрямую, если фейл - то через прокси)
-        # Обычно get.docker.com сам разбирается, но для надежности запустим без прокси,
-        # так как Docker тянет большие образы и через socks5 это будет медленно.
-        fn_install_docker "" 
+        # 3. Docker (обычно ставим без прокси, это надежнее для зеркал)
+        fn_install_docker
         
-        # 4. Ставим Claude (через прокси, т.к. claude.ai часто блочат)
+        # 4. Claude
         fn_install_claude_new "$PREFIX"
         ;;
     *)
@@ -273,11 +251,18 @@ case $CHOICE in
 esac
 
 echo
-echo -e "${C_GREEN}=== ГОТОВО ===${C_NC}"
-if [[ $CHOICE == 2 || $CHOICE == 4 ]]; then
-    echo "Важное примечание по Docker: Чтобы изменения групп вступили в силу,"
-    echo "вам может потребоваться перезайти в систему (logout/login)."
+echo -e "${C_GREEN}=== ЗАВЕРШЕНО ===${C_NC}"
+echo "Для запуска Claude:"
+if [ "$USE_PROXY_FLAG" = true ]; then
+    echo -e "  ${C_BLUE}proxychains4 claude${C_NC}"
+else
+    echo -e "  ${C_BLUE}claude${C_NC}"
 fi
-if [[ -n "$PREFIX" ]]; then
-    echo "Запуск Claude через прокси: proxychains4 claude"
+
+# Проверка PATH
+if ! command -v claude &> /dev/null; then
+    echo -e "${C_YELLOW}Внимание: 'claude' не найден в PATH.${C_NC}"
+    echo "Попробуйте выполнить команду:"
+    echo "  source ~/.bashrc"
+    echo "Или найдите его тут: ~/.local/bin/claude"
 fi
