@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ==============================================================================
-# Установщик MEDIA WORKS: Claude Code, Docker & VibeEnv (v7)
+# Установщик MEDIA WORKS: Claude Code, Docker & VibeEnv (v8)
 #
-# Изменения v7:
-# 1. AUTO-PATH: Создает симлинк в /usr/local/bin. Claude работает сразу.
-# 2. DOCKER: Гарантирует установку Docker Compose Plugin (v2) и удаляет старый (v1).
-# 3. PROXY: Умная проверка подключения.
+# Изменения v8:
+# 1. SILENT MODE: Авто-добавление PATH в .bashrc/.zshrc (убирает warning).
+# 2. DUAL USER FIX: Настройка путей и для root, и для sudo-пользователя.
+# 3. DOCKER CHECK: Гарантия Docker Compose v2.
 # ==============================================================================
 
 # --- Цвета ---
@@ -19,7 +19,6 @@ C_NC='\033[0m'
 
 # --- Глобальные переменные ---
 PKG_MANAGER=""
-OS_TYPE=""
 PROXY_IP=""
 PROXY_USER="proxyuser"
 PROXYCHAINS_CONF_FILE=""
@@ -78,7 +77,7 @@ fn_update_system() {
 fn_install_proxychains() {
     echo -e "${C_YELLOW}--- 2. Настройка Proxychains ---${C_NC}"
     
-    # Проверка установки
+    # Проверка бинарника
     if ! command -v proxychains4 &> /dev/null; then
         if [ "$PKG_MANAGER" == "apt" ]; then
             apt install -y proxychains-ng
@@ -92,7 +91,6 @@ fn_install_proxychains() {
         PROXYCHAINS_CONF_FILE=$(find /etc -name "proxychains*.conf" | head -n 1)
     fi
 
-    # Логика настройки
     echo -e "Если вы в РФ, Claude требует SOCKS5 прокси. Если нет - нажмите Enter."
     read -p "Введите IP SOCKS5 прокси: " PROXY_IP
     
@@ -114,15 +112,15 @@ EOF
         echo -e "${C_GREEN}Proxychains настроен.${C_NC}"
         USE_PROXY_FLAG=true
     else
-        echo -e "${C_YELLOW}Прокси не задан. Используем прямое соединение.${C_NC}"
+        echo -e "${C_YELLOW}Прокси не задан. Прямое соединение.${C_NC}"
         USE_PROXY_FLAG=false
     fi
 }
 
 fn_install_docker() {
-    echo -e "${C_YELLOW}--- 3. Установка Docker & Docker Compose (Plugin) ---${C_NC}"
+    echo -e "${C_YELLOW}--- 3. Установка Docker & Docker Compose (v2) ---${C_NC}"
     
-    # Удаляем старый docker-compose (v1), чтобы не мешал
+    # Снос старого compose (v1)
     if [ "$PKG_MANAGER" == "apt" ]; then
         apt remove -y docker-compose 2>/dev/null
     fi
@@ -130,7 +128,7 @@ fn_install_docker() {
     if command -v docker &> /dev/null; then
         echo "Docker Engine уже установлен."
     else
-        echo "Загрузка официального скрипта Docker..."
+        echo "Загрузка скрипта Docker..."
         curl -fsSL https://get.docker.com -o get-docker.sh
         sh get-docker.sh
         rm get-docker.sh
@@ -138,20 +136,17 @@ fn_install_docker() {
         systemctl start docker
         systemctl enable docker
         
-        # Добавляем пользователя
         REAL_USER=${SUDO_USER:-$USER}
         usermod -aG docker "$REAL_USER"
     fi
 
-    # Проверка версии Compose
-    echo -e "${C_BLUE}Проверка версии Docker Compose...${C_NC}"
+    # Проверка Compose v2
+    echo -e "${C_BLUE}Проверка плагина Compose...${C_NC}"
     if docker compose version &> /dev/null; then
         D_VER=$(docker compose version)
-        echo -e "${C_GREEN}✅ Успешно: $D_VER${C_NC}"
-        echo -e "Используйте команду: ${C_CYAN}docker compose${C_NC} (с пробелом), а не docker-compose."
+        echo -e "${C_GREEN}✅ OK: $D_VER${C_NC}"
     else
-        echo -e "${C_RED}⚠ Ошибка: Docker Compose Plugin не обнаружен.${C_NC}"
-        echo "Попытка ручной установки плагина..."
+        echo -e "${C_RED}⚠ Плагин не найден. Ставим вручную...${C_NC}"
         if [ "$PKG_MANAGER" == "apt" ]; then
             apt install -y docker-compose-plugin
         elif [ "$PKG_MANAGER" == "yum" ]; then
@@ -174,7 +169,7 @@ fn_install_claude_new() {
     local prefix_cmd="$1"
     echo -e "${C_YELLOW}--- 5. Установка Claude Code ---${C_NC}"
     
-    # Удаляем старые бинарники/линки
+    # Чистка
     rm -f /usr/local/bin/claude
     rm -f /root/.local/bin/claude
     
@@ -195,21 +190,18 @@ fn_install_claude_new() {
     rm "$tmp_install"
 
     if [ $RET_CODE -eq 0 ]; then
+        # 1. Симлинк (физический доступ)
         fn_fix_path_symlink
+        # 2. Переменные окружения (убирает warning)
+        fn_update_shell_rc
     else
         echo -e "${C_RED}ОШИБКА установки Claude.${C_NC}"
         return 1
     fi
 }
 
-# --- Финальный штрих: Симлинк ---
 fn_fix_path_symlink() {
-    echo -e "${C_YELLOW}--- Интеграция в PATH ---${C_NC}"
-    
-    # Ищем, куда установился файл. 
-    # При установке от root часто падает в /root/.local/bin, 
-    # но иногда установщик определяет реального пользователя.
-    
+    echo -e "${C_YELLOW}--- Настройка путей (Symlink) ---${C_NC}"
     TARGET_PATH=""
     
     if [ -f "$HOME/.local/bin/claude" ]; then
@@ -219,13 +211,43 @@ fn_fix_path_symlink() {
     fi
     
     if [ -n "$TARGET_PATH" ]; then
-        # Создаем глобальный симлинк
         ln -sf "$TARGET_PATH" /usr/local/bin/claude
-        echo -e "${C_GREEN}✅ Симлинк создан: /usr/local/bin/claude -> $TARGET_PATH${C_NC}"
-        echo -e "${C_GREEN}Команда 'claude' теперь доступна глобально!${C_NC}"
+        echo -e "${C_GREEN}✅ Симлинк создан в /usr/local/bin/claude${C_NC}"
     else
-        echo -e "${C_RED}Не удалось найти бинарный файл claude для создания ссылки.${C_NC}"
-        echo "Проверьте ~/.local/bin вручную."
+        echo -e "${C_RED}Бинарник не найден для создания симлинка.${C_NC}"
+    fi
+}
+
+# --- Новая функция для правки .bashrc ---
+fn_update_shell_rc() {
+    echo -e "${C_YELLOW}--- Обновление .bashrc (убирает Warning) ---${C_NC}"
+    
+    local ADD_LINE='export PATH="$HOME/.local/bin:$PATH"'
+    
+    # Функция применения к конкретному файлу
+    apply_to_file() {
+        local f="$1"
+        if [ -f "$f" ]; then
+            if ! grep -q ".local/bin" "$f"; then
+                echo "" >> "$f"
+                echo "# Added by Vibe Coding Installer" >> "$f"
+                echo "$ADD_LINE" >> "$f"
+                echo -e "${C_GREEN}Обновлен: $f${C_NC}"
+            else
+                echo "Уже настроен: $f"
+            fi
+        fi
+    }
+
+    # 1. Для root
+    apply_to_file "/root/.bashrc"
+    apply_to_file "/root/.zshrc"
+
+    # 2. Для реального пользователя (если есть)
+    if [ -n "$SUDO_USER" ]; then
+        local USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        apply_to_file "$USER_HOME/.bashrc"
+        apply_to_file "$USER_HOME/.zshrc"
     fi
 }
 
@@ -238,10 +260,10 @@ fn_check_root
 fn_detect_os
 
 echo "Выберите режим установки:"
-echo "  1) Claude Code (Только Claude + Proxy check)"
-echo "  2) Docker + Docker Compose (v2 Plugin)"
-echo "  3) Настройка Proxychains (SOCKS5)"
-echo -e "${C_CYAN}  4) VIBE CODING PACK (Claude + Docker v2 + Tools + Proxy)${C_NC}"
+echo "  1) Claude Code (Только Claude)"
+echo "  2) Docker + Docker Compose (v2)"
+echo "  3) Настройка Proxychains"
+echo -e "${C_CYAN}  4) VIBE CODING PACK (Claude + Docker + Tools + Proxy)${C_NC}"
 echo
 read -p "Ваш выбор: " CHOICE
 
@@ -264,18 +286,10 @@ case $CHOICE in
     4)
         echo -e "${C_CYAN}>>> Запуск полной установки Vibe Coding Pack <<<${C_NC}"
         fn_update_system
-        
-        # 1. Прокси
         fn_install_proxychains
         if [ "$USE_PROXY_FLAG" = true ]; then PREFIX="proxychains4"; else PREFIX=""; fi
-        
-        # 2. Инструменты
         fn_install_tools "$PREFIX"
-        
-        # 3. Docker (проверяет и ставит новый)
         fn_install_docker
-        
-        # 4. Claude
         fn_install_claude_new "$PREFIX"
         ;;
     *)
