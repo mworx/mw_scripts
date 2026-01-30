@@ -65,27 +65,55 @@ fn_detect_os() {
     fi
 }
 
+# ==============================================================================
+# ИСПРАВЛЕННЫЕ ФУНКЦИИ (V9)
+# ==============================================================================
+
 fn_update_system() {
-    echo -e "${C_YELLOW}--- 1. Обновление пакетов ---${C_NC}"
+    echo -e "${C_YELLOW}--- 1. Обновление пакетов и установка Node.js ---${C_NC}"
+    
+    # 1. Базовые утилиты
     if [ "$PKG_MANAGER" == "apt" ]; then
         apt update && apt install -y curl wget git build-essential
+        # Установка Node.js 20.x (Debian/Ubuntu)
+        if ! command -v node &> /dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+            apt install -y nodejs
+        fi
     elif [ "$PKG_MANAGER" == "yum" ]; then
+        # Установка EPEL (важно для RHEL 9)
+        yum install -y epel-release
         yum install -y curl wget git gcc-c++ make
+        
+        # Установка Node.js 20.x (RHEL/CentOS/Alma/Rocky)
+        # ВАЖНО: --allowerasing решает конфликт с модулями AppStream
+        if ! command -v node &> /dev/null; then
+            echo "Настройка репозитория NodeSource..."
+            curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+            echo "Установка Node.js..."
+            dnf install -y nodejs --allowerasing
+        else
+             echo "Node.js уже установлен: $(node -v)"
+        fi
     fi
 }
 
 fn_install_proxychains() {
     echo -e "${C_YELLOW}--- 2. Настройка Proxychains ---${C_NC}"
     
-    # Проверка бинарника
+    # Установка пакета
     if ! command -v proxychains4 &> /dev/null; then
         if [ "$PKG_MANAGER" == "apt" ]; then
             apt install -y proxychains-ng
             PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"
         elif [ "$PKG_MANAGER" == "yum" ]; then
-            yum install -y epel-release
             yum install -y proxychains-ng
-            if [ -f /etc/proxychains4.conf ]; then PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"; else PROXYCHAINS_CONF_FILE="/etc/proxychains.conf"; fi
+            # Поиск конфига, так как в RHEL он может быть в разных местах
+            if [ -f /etc/proxychains4.conf ]; then 
+                PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"
+            else 
+                PROXYCHAINS_CONF_FILE="/etc/proxychains.conf"
+            fi
         fi
     else
         PROXYCHAINS_CONF_FILE=$(find /etc -name "proxychains*.conf" | head -n 1)
@@ -99,17 +127,19 @@ fn_install_proxychains() {
         echo
         cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak" 2>/dev/null
         
+        # Генерация конфига
+        # ВАЖНО: proxy_dns закомментирован (#), чтобы не ломать Node.js
         cat << EOF > "$PROXYCHAINS_CONF_FILE"
 dynamic_chain
 quiet_mode
-proxy_dns
+#proxy_dns 
 remote_dns_subnet 224
 tcp_read_time_out 15000
 tcp_connect_time_out 8000
 [ProxyList]
 socks5 $PROXY_IP 1080 $PROXY_USER $PROXY_PASS
 EOF
-        echo -e "${C_GREEN}Proxychains настроен.${C_NC}"
+        echo -e "${C_GREEN}Proxychains настроен (proxy_dns отключен для совместимости с Node.js).${C_NC}"
         USE_PROXY_FLAG=true
     else
         echo -e "${C_YELLOW}Прокси не задан. Прямое соединение.${C_NC}"
@@ -117,85 +147,40 @@ EOF
     fi
 }
 
-fn_install_docker() {
-    echo -e "${C_YELLOW}--- 3. Установка Docker & Docker Compose (v2) ---${C_NC}"
-    
-    # Снос старого compose (v1)
-    if [ "$PKG_MANAGER" == "apt" ]; then
-        apt remove -y docker-compose 2>/dev/null
-    fi
-
-    if command -v docker &> /dev/null; then
-        echo "Docker Engine уже установлен."
-    else
-        echo "Загрузка скрипта Docker..."
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh
-        rm get-docker.sh
-        
-        systemctl start docker
-        systemctl enable docker
-        
-        REAL_USER=${SUDO_USER:-$USER}
-        usermod -aG docker "$REAL_USER"
-    fi
-
-    # Проверка Compose v2
-    echo -e "${C_BLUE}Проверка плагина Compose...${C_NC}"
-    if docker compose version &> /dev/null; then
-        D_VER=$(docker compose version)
-        echo -e "${C_GREEN}✅ OK: $D_VER${C_NC}"
-    else
-        echo -e "${C_RED}⚠ Плагин не найден. Ставим вручную...${C_NC}"
-        if [ "$PKG_MANAGER" == "apt" ]; then
-            apt install -y docker-compose-plugin
-        elif [ "$PKG_MANAGER" == "yum" ]; then
-            yum install -y docker-compose-plugin
-        fi
-    fi
-}
-
-fn_install_tools() {
-    local prefix_cmd="$1"
-    echo -e "${C_YELLOW}--- 4. Установка инструментов (ripgrep, fzf, jq) ---${C_NC}"
-    if [ "$PKG_MANAGER" == "apt" ]; then
-        $prefix_cmd apt install -y ripgrep fzf jq htop
-    elif [ "$PKG_MANAGER" == "yum" ]; then
-        $prefix_cmd yum install -y ripgrep fzf jq htop
-    fi
-}
-
 fn_install_claude_new() {
     local prefix_cmd="$1"
-    echo -e "${C_YELLOW}--- 5. Установка Claude Code ---${C_NC}"
+    echo -e "${C_YELLOW}--- 5. Установка Claude Code (через NPM) ---${C_NC}"
     
-    # Чистка
-    rm -f /usr/local/bin/claude
-    rm -f /root/.local/bin/claude
+    # Проверка наличия npm
+    if ! command -v npm &> /dev/null; then
+        echo -e "${C_RED}Ошибка: NPM не установлен. Проверьте шаг 1.${C_NC}"
+        exit 1
+    fi
+
+    echo "Установка глобального пакета @anthropic-ai/claude-code..."
     
-    local tmp_install="/tmp/claude_inst.sh"
-    echo '#!/bin/bash' > "$tmp_install"
-    echo 'set -e; set -o pipefail' >> "$tmp_install"
-    echo 'curl -fsSL https://claude.ai/install.sh | bash' >> "$tmp_install"
-    chmod +x "$tmp_install"
-    
+    # Сама установка
     if [ -n "$prefix_cmd" ]; then
-        echo "Скачивание через прокси..."
-        $prefix_cmd "$tmp_install"
+        $prefix_cmd npm install -g @anthropic-ai/claude-code
     else
-        "$tmp_install"
+        npm install -g @anthropic-ai/claude-code
     fi
     
-    RET_CODE=$?
-    rm "$tmp_install"
-
-    if [ $RET_CODE -eq 0 ]; then
-        # 1. Симлинк (физический доступ)
-        fn_fix_path_symlink
-        # 2. Переменные окружения (убирает warning)
+    if [ $? -eq 0 ]; then
+        echo -e "${C_GREEN}Claude успешно установлен!${C_NC}"
+        # Вывод версии для проверки
+        if [ -n "$prefix_cmd" ]; then
+            $prefix_cmd claude --version
+        else
+            claude --version
+        fi
+        
+        # Обновление путей (больше не нужны симлинки, npm ставит в /usr/bin или /usr/local/bin, которые в PATH)
+        # Но на всякий случай оставим вызов обновления .bashrc, если npm настроен нестандартно
         fn_update_shell_rc
     else
-        echo -e "${C_RED}ОШИБКА установки Claude.${C_NC}"
+        echo -e "${C_RED}ОШИБКА установки через NPM.${C_NC}"
+        echo "Попробуйте вручную: proxychains4 npm install -g @anthropic-ai/claude-code"
         return 1
     fi
 }
