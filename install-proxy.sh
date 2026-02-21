@@ -269,6 +269,10 @@ fn_install_claude_smart() {
         fi
 
         echo "Установка через NPM..."
+        
+        # КРИТИЧЕСКИЙ ФИКС: Форсируем использование изолированного node для npm
+        export PATH="/opt/vibe-node/bin:$PATH"
+        
         if [ -n "$prefix_cmd" ]; then
             $prefix_cmd $NPM_BIN install -g @anthropic-ai/claude-code
         else
