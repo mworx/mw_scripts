@@ -258,7 +258,7 @@ fn_install_claude_smart() {
     echo -e "${C_YELLOW}--- Установка Claude Code (Smart Routing) ---${C_NC}"
 
     if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-        echo -e "${C_RED}[!] Обнаружен CentOS 7. Активация пеочницы NPM для Claude Code...${C_NC}"
+        echo -e "${C_RED}[!] Обнаружен CentOS 7. Активация песочницы NPM для Claude Code...${C_NC}"
         
         fn_install_nodejs_sandboxed
         
