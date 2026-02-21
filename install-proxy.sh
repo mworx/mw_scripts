@@ -181,7 +181,7 @@ fn_install_docker() {
 }
 
 # ==============================================================================
-# NODE.JS SANDBOX И SMART CLAUDE INSTALLER
+# NODE.JS SANDBOX (CURL NATIVE PROXY)
 # ==============================================================================
 
 fn_install_nodejs_sandboxed() {
@@ -194,21 +194,28 @@ fn_install_nodejs_sandboxed() {
     mkdir -p $NODE_DIR
     cd /tmp
 
+    # Формируем команду curl. Флаг -k отключает проверку сертификатов для EOL CentOS 7
+    local CURL_CMD="curl -fsSLk"
+    if [ "$USE_PROXY_FLAG" = true ]; then
+        echo "Используется нативный SOCKS5-прокси для загрузки..."
+        CURL_CMD="curl -fsSLk -x socks5h://${PROXY_USER}:${PROXY_PASS}@${PROXY_IP}:${PROXY_PORT}"
+    fi
+
     if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-        echo "Скачивание специальной сборки Node 20 (glibc 2.17) через прокси..."
+        echo "Скачивание специальной сборки Node 20 (glibc 2.17)..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
         
-        ${PREFIX}wget -q --no-check-certificate "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js. Проверьте прокси.${C_NC}"; exit 1; }
+        $CURL_CMD "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}" -o "$NODE_FILE" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js. Проверьте доступность узла.${C_NC}"; exit 1; }
         
         tar -xzf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     else
-        echo "Скачивание LTS сборки Node 20 через прокси..."
+        echo "Скачивание LTS сборки Node 20..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64.tar.xz"
         
-        ${PREFIX}wget -q --no-check-certificate "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js. Проверьте прокси.${C_NC}"; exit 1; }
+        $CURL_CMD "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}" -o "$NODE_FILE" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js.${C_NC}"; exit 1; }
         
         tar -xJf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
