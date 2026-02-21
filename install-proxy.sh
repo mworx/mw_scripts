@@ -195,19 +195,21 @@ fn_install_nodejs_sandboxed() {
     cd /tmp
 
     if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-        echo "Скачивание специальной сборки Node 20 (glibc 2.17)..."
+        echo "Скачивание специальной сборки Node 20 (glibc 2.17) через прокси..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
-        # Убран флаг --show-progress для совместимости с wget 1.14
-        wget -q "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}"
+        
+        ${PREFIX}wget -q --no-check-certificate "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js. Проверьте прокси.${C_NC}"; exit 1; }
+        
         tar -xzf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     else
-        echo "Скачивание LTS сборки Node 20..."
+        echo "Скачивание LTS сборки Node 20 через прокси..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64.tar.xz"
-        # Убран флаг --show-progress
-        wget -q "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}"
+        
+        ${PREFIX}wget -q --no-check-certificate "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js. Проверьте прокси.${C_NC}"; exit 1; }
+        
         tar -xJf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     fi
