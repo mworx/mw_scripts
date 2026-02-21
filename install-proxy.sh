@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-# Установщик MEDIA WORKS: Claude Code, Docker & VibeEnv (Enterprise & Presale)
-# Архитектура: Изолированная среда (Sandbox) + Tmux Orchestration
+# Установщик MEDIA WORKS: Claude Code, Docker & VibeEnv (Native & Presale)
+# Архитектура: Нативный бинарник Claude + Изолированный Node.js для демо
 # ==============================================================================
 
 # --- Цвета ---
@@ -37,7 +37,7 @@ fn_show_logo() {
     echo "  ██║ ╚═╝ ██║███████╗██████╔╝██║██║  ██║    ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗███████║"
     echo "  ╚═╝     ╚═╝╚══════╝╚═════╝ ╚═╝╚═╝  ╚═╝     ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝"
     echo "  ═════════════════════════════════════════════════════════════════════════════════════"
-    echo "                    VibeEnv Installer: Sandbox & Presale Edition"
+    echo "                    VibeEnv Installer: Native Claude Edition"
     echo "  ═════════════════════════════════════════════════════════════════════════════════════"
     echo -e "${C_NC}"
 }
@@ -74,7 +74,7 @@ fn_detect_os() {
 
 fn_setup_proxy() {
     echo -e "${C_YELLOW}--- Настройка сетевого доступа (Proxychains) ---${C_NC}"
-    echo "Для доступа к API Claude в изолированных сетях может потребоваться SOCKS5 прокси."
+    echo "Для установки и работы Claude Code в закрытых контурах требуется SOCKS5 прокси."
     echo -e "${C_CYAN}Нажмите [ENTER] для пропуска, если доступ прямой.${C_NC}"
     read -p "IP адрес SOCKS5 прокси (например, 192.168.1.50): " PROXY_IP
     
@@ -120,26 +120,26 @@ EOF
 }
 
 # ==============================================================================
-# ПОДГОТОВКА СИСТЕМЫ (РАЗДЕЛЕНИЕ ПРОФИЛЕЙ)
+# ПОДГОТОВКА СИСТЕМЫ
 # ==============================================================================
 
 fn_prepare_minimal() {
     echo -e "${C_YELLOW}--- 1. Проверка базовых утилит (Безопасный режим Bitrix) ---${C_NC}"
     if [ "$PKG_MANAGER" == "apt" ]; then
         apt-get update >/dev/null 2>&1
-        apt-get install -y curl wget tar xz-utils >/dev/null 2>&1
+        apt-get install -y curl wget jq >/dev/null 2>&1
     elif [ "$PKG_MANAGER" == "yum" ]; then
         if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
             sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* 2>/dev/null
             sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-* 2>/dev/null
         fi
-        yum install -y curl wget tar xz >/dev/null 2>&1
+        yum install -y curl wget jq >/dev/null 2>&1
     fi
     echo -e "${C_GREEN}Базовые утилиты готовы.${C_NC}"
 }
 
 fn_prepare_full() {
-    echo -e "${C_YELLOW}--- 1. Установка полных зависимостей для разработки ---${C_NC}"
+    echo -e "${C_YELLOW}--- 1. Установка зависимостей для разработки ---${C_NC}"
     if [ "$PKG_MANAGER" == "apt" ]; then
         apt-get update
         apt-get install -y curl wget git build-essential xz-utils jq htop tmux python3 python3-venv python3-pip
@@ -160,7 +160,6 @@ fn_prepare_full() {
 
 fn_install_docker() {
     echo -e "${C_YELLOW}--- Установка Docker и Compose v2 ---${C_NC}"
-    
     if ! command -v docker &> /dev/null; then
         if [ "$PKG_MANAGER" == "apt" ]; then
             curl -fsSL https://get.docker.com | bash
@@ -185,11 +184,47 @@ fn_install_docker() {
 }
 
 # ==============================================================================
-# ИЗОЛИРОВАННЫЙ NODE.JS И CLAUDE CODE
+# CLAUDE NATIVE & NODE.JS SANDBOX
 # ==============================================================================
 
+fn_install_claude_native() {
+    local prefix_cmd="$1"
+    echo -e "${C_YELLOW}--- Установка Claude Code (Native Binary) ---${C_NC}"
+    
+    # Запускаем официальный bash-скрипт с пробросом прокси на весь процесс
+    if [ -n "$prefix_cmd" ]; then
+        echo "Выполнение нативного установщика через прокси..."
+        $prefix_cmd bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+    else
+        curl -fsSL https://claude.ai/install.sh | bash
+    fi
+
+    # Ищем бинарник после установки
+    local CLAUDE_BIN=""
+    if command -v claude &> /dev/null; then
+        CLAUDE_BIN=$(command -v claude)
+    elif [ -f "$HOME/.local/bin/claude" ]; then
+        CLAUDE_BIN="$HOME/.local/bin/claude"
+    elif [ -f "/usr/local/bin/claude" ]; then
+        CLAUDE_BIN="/usr/local/bin/claude"
+    elif [ -n "$SUDO_USER" ] && [ -f "/home/$SUDO_USER/.local/bin/claude" ]; then
+        CLAUDE_BIN="/home/$SUDO_USER/.local/bin/claude"
+    fi
+
+    if [ -n "$CLAUDE_BIN" ]; then
+        echo -e "${C_GREEN}Установка успешна: $CLAUDE_BIN${C_NC}"
+        # Глобальный симлинк для надежности, если инсталлятор его не сделал
+        if [ "$CLAUDE_BIN" != "/usr/local/bin/claude" ] && [ ! -f "/usr/local/bin/claude" ]; then
+            ln -sf "$CLAUDE_BIN" /usr/local/bin/claude
+        fi
+    else
+        echo -e "${C_RED}[!] Ошибка: бинарник claude не найден после установки.${C_NC}"
+        exit 1
+    fi
+}
+
 fn_install_nodejs_sandboxed() {
-    echo -e "${C_YELLOW}--- Развертывание изолированного Node.js 20 ---${C_NC}"
+    echo -e "${C_YELLOW}--- Подготовка песочницы Node.js (Для Vite/React) ---${C_NC}"
     
     local NODE_DIR="/opt/vibe-node"
     if [ -d "$NODE_DIR/bin" ] && [ -x "$NODE_DIR/bin/node" ]; then
@@ -201,57 +236,19 @@ fn_install_nodejs_sandboxed() {
     cd /tmp
 
     if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-        echo "Режим CentOS 7: загрузка неофициальной сборки Node 20 (glibc 2.17)..."
+        echo "Режим CentOS 7: загрузка сборки glibc 2.17..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
         wget -q --show-progress "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}"
         tar -xzf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     else
-        echo "Загрузка официальной LTS сборки Node 20..."
+        echo "Загрузка официальной сборки Node 20..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64.tar.xz"
         wget -q --show-progress "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}"
         tar -xJf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
-    fi
-
-    echo -e "${C_GREEN}Sandbox готов. Версия: $($NODE_DIR/bin/node -v)${C_NC}"
-}
-
-fn_install_claude_new() {
-    local prefix_cmd="$1"
-    echo -e "${C_YELLOW}--- Установка Claude Code (Wrapper Mode) ---${C_NC}"
-    
-    local NPM_BIN="/opt/vibe-node/bin/npm"
-
-    if [ ! -x "$NPM_BIN" ]; then
-        echo -e "${C_RED}[!] Критическая ошибка: NPM не найден в /opt/vibe-node.${C_NC}"
-        exit 1
-    fi
-
-    echo "Установка @anthropic-ai/claude-code..."
-    if [ -n "$prefix_cmd" ]; then
-        $prefix_cmd $NPM_BIN install -g @anthropic-ai/claude-code
-    else
-        $NPM_BIN install -g @anthropic-ai/claude-code
-    fi
-    
-    cat << 'EOF' > /usr/local/bin/claude
-#!/bin/bash
-# VibeEnv Claude Wrapper - Полная изоляция от системного окружения (Bitrix Safe)
-unset NODE_ENV
-unset NODE_PATH
-export PATH="/opt/vibe-node/bin:$PATH"
-exec /opt/vibe-node/bin/claude "$@"
-EOF
-    chmod +x /usr/local/bin/claude
-    
-    if command -v claude &> /dev/null; then
-        echo -e "${C_GREEN}Установка успешна. Изолированный бинарник /usr/local/bin/claude активен.${C_NC}"
-    else
-        echo -e "${C_RED}[!] Ошибка проверки работоспособности claude.${C_NC}"
-        exit 1
     fi
 }
 
@@ -379,7 +376,25 @@ export default defineConfig({
 })
 EOF
 
-    # 5. Tmux Launcher
+    # 5. Git Init
+    echo -e "${C_CYAN}Инициализация Git репозитория...${C_NC}"
+    cd "$DEMO_DIR"
+    git config --global user.name "VibeEnv Auto"
+    git config --global user.email "auto@vibe.env"
+    git init >/dev/null 2>&1
+    
+    cat << 'EOF' > .gitignore
+node_modules/
+venv/
+.env
+__pycache__/
+dist/
+EOF
+    
+    git add . >/dev/null 2>&1
+    git commit -m "feat: init presale demo stack (Docker, FastAPI, Vite)" >/dev/null 2>&1
+
+    # 6. Tmux Launcher
     echo -e "${C_CYAN}Создание скрипта запуска Tmux...${C_NC}"
     cat << 'EOF' > "$DEMO_DIR/start_vibe.sh"
 #!/bin/bash
@@ -405,8 +420,8 @@ fn_interactive_menu() {
     fn_show_logo
     
     if [ -f /etc/bitrixenv ]; then
-        echo -e "${C_YELLOW}[!] Обнаружен BitrixEnv. Включен режим глубокой изоляции (Sandbox).${C_NC}"
-        echo -e "${C_YELLOW}    Используй только Minimal Edition [1].${C_NC}"
+        echo -e "${C_YELLOW}[!] Обнаружен BitrixEnv. Нативный бинарник может не запуститься из-за старой glibc.${C_NC}"
+        echo -e "${C_YELLOW}    Рекомендуется использовать только Minimal Edition [1].${C_NC}"
     fi
 
     echo -e "${C_CYAN}======================================================================${C_NC}"
@@ -414,13 +429,13 @@ fn_interactive_menu() {
     echo -e "${C_CYAN}======================================================================${C_NC}"
     echo
     echo -e "  ${C_GREEN}[1] Minimal Edition: Только Claude Code${C_NC}"
-    echo "      (Для клиентских серверов. Строгая изоляция Node.js + ИИ-ассистент)"
+    echo "      (Нативная установка CLI-ассистента для закрытых серверов)"
     echo
     echo -e "  ${C_BLUE}[2] Full VibeEnv Stack: Claude + Docker + Presale Demo${C_NC}"
-    echo "      (Полноценный стек для разработки и демо на новой машине)"
+    echo "      (Нативный Claude + изолированный Node + демо стенд + Git)"
     echo
-    echo -e "  ${C_YELLOW}[3] Infrastructure Only: Docker + Tools${C_NC}"
-    echo "      (Подготовка среды без установки Claude и демо-кода)"
+    echo -e "  ${C_YELLOW}[3] Infrastructure Only: Docker + Tools + Claude${C_NC}"
+    echo "      (Подготовка чистой среды без генерации демо-архитектуры)"
     echo
     echo -e "  ${C_CYAN}[4] Proxy Reconfigure: Настройка сети${C_NC}"
     echo "      (Изменить или отключить текущие настройки Proxychains)"
@@ -437,15 +452,14 @@ fn_interactive_menu() {
         1)
             fn_setup_proxy
             fn_prepare_minimal
-            fn_install_nodejs_sandboxed
-            fn_install_claude_new "$PREFIX"
+            fn_install_claude_native "$PREFIX"
             ;;
         2)
             fn_setup_proxy
             fn_prepare_full
             fn_install_docker
             fn_install_nodejs_sandboxed
-            fn_install_claude_new "$PREFIX"
+            fn_install_claude_native "$PREFIX"
             fn_deploy_presale_stack
             echo -e "${C_GREEN}Для запуска демо-стенда выполните: ${C_BLUE}/opt/vibe-demo/start_vibe.sh${C_NC}"
             ;;
@@ -453,6 +467,7 @@ fn_interactive_menu() {
             fn_setup_proxy
             fn_prepare_full
             fn_install_docker
+            fn_install_claude_native "$PREFIX"
             ;;
         4)
             fn_setup_proxy
@@ -473,7 +488,7 @@ fn_interactive_menu() {
     echo -e "${C_GREEN}                      УСТАНОВКА ЗАВЕРШЕНА                             ${C_NC}"
     echo -e "${C_GREEN}======================================================================${C_NC}"
     
-    if [[ "$CHOICE" == "1" || "$CHOICE" == "2" ]]; then
+    if [[ "$CHOICE" == "1" || "$CHOICE" == "2" || "$CHOICE" == "3" ]]; then
         if [ "$USE_PROXY_FLAG" = true ]; then
             echo -e "Авторизация: ${C_BLUE}proxychains4 claude login${C_NC}"
         else
