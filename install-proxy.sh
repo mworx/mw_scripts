@@ -231,7 +231,7 @@ fn_install_nodejs_sandboxed() {
     fi
 
     if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-        echo -e "${C_BLUE}Скачивание Node.js 20 (glibc 2.17)...${C_NC}"
+        echo -e "${C_BLUE}Скачивание неофициального Node.js 20 для устаревшей glibc 2.17...${C_NC}"
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
         
@@ -258,7 +258,7 @@ fn_install_claude_smart() {
     echo -e "${C_YELLOW}--- Установка Claude Code (Smart Routing) ---${C_NC}"
 
     if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-        echo -e "${C_RED}[!] Обнаружен CentOS 7. Активация NPM Sandbox Fallback...${C_NC}"
+        echo -e "${C_RED}[!] Обнаружен CentOS 7. Активация пеочницы NPM для Claude Code...${C_NC}"
         
         fn_install_nodejs_sandboxed
         
