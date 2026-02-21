@@ -1,12 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-# Установщик MEDIA WORKS: Claude Code, Docker & VibeEnv (v9 - CentOS 7 Fix)
-#
-# Изменения:
-# 1. CRITICAL: Обход ограничения glibc 2.17 в CentOS 7 для Node.js 20.
-# 2. Добавлены отсутствующие функции (fn_install_docker, fn_install_tools).
-# 3. Фикс репозиториев для EOL систем.
+# Установщик MEDIA WORKS: Claude Code, Docker & VibeEnv (Enterprise & Presale)
+# Архитектура: Изолированная среда (Sandbox) + Tmux Orchestration
 # ==============================================================================
 
 # --- Цвета ---
@@ -25,9 +21,10 @@ PROXY_IP=""
 PROXY_USER="proxyuser"
 PROXYCHAINS_CONF_FILE=""
 USE_PROXY_FLAG=false
+PREFIX=""
 
 # ==============================================================================
-# ФУНКЦИИ БАЗОВЫЕ
+# БАЗОВЫЕ ФУНКЦИИ
 # ==============================================================================
 
 fn_show_logo() {
@@ -40,13 +37,14 @@ fn_show_logo() {
     echo "  ██║ ╚═╝ ██║███████╗██████╔╝██║██║  ██║    ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗███████║"
     echo "  ╚═╝     ╚═╝╚══════╝╚═════╝ ╚═╝╚═╝  ╚═╝     ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝"
     echo "  ═════════════════════════════════════════════════════════════════════════════════════"
-    echo "                                  Установщик Claude Code"
+    echo "                    VibeEnv Installer: Sandbox & Presale Edition"
     echo "  ═════════════════════════════════════════════════════════════════════════════════════"
+    echo -e "${C_NC}"
 }
 
 fn_check_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo -e "${C_RED}Ошибка: Запустите скрипт через sudo или от root.${C_NC}"
+        echo -e "${C_RED}[!] Ошибка: Запуск разрешен только от root (или sudo).${C_NC}"
         exit 1
     fi
 }
@@ -59,99 +57,55 @@ fn_detect_os() {
         
         if [[ "$ID_LIKE" == *"debian"* || "$ID" == "debian" || "$ID" == "ubuntu" ]]; then
             PKG_MANAGER="apt"
-        elif [[ "$ID_LIKE" == *"rhel"* || "$ID" == "centos" || "$ID" == "fedora" ]]; then
+        elif [[ "$ID_LIKE" == *"rhel"* || "$ID" == "centos" || "$ID" == "fedora" || "$ID" == "almalinux" ]]; then
             PKG_MANAGER="yum"
         else
             PKG_MANAGER="apt"
         fi
     else
-        echo -e "${C_RED}Не удалось определить ОС. Выход.${C_NC}"
+        echo -e "${C_RED}[!] Не удалось определить ОС. Работа прервана.${C_NC}"
         exit 1
     fi
 }
 
 # ==============================================================================
-# УСТАНОВКА И НАСТРОЙКА
+# СЕТЬ И ПРОКСИ
 # ==============================================================================
 
-fn_update_system() {
-    echo -e "${C_YELLOW}--- 1. Обновление пакетов и установка Node.js ---${C_NC}"
+fn_setup_proxy() {
+    echo -e "${C_YELLOW}--- Настройка сетевого доступа (Proxychains) ---${C_NC}"
+    echo "Для доступа к API Claude в изолированных сетях может потребоваться SOCKS5 прокси."
+    echo -e "${C_CYAN}Нажмите [ENTER] для пропуска, если доступ прямой.${C_NC}"
+    read -p "IP адрес SOCKS5 прокси (например, 192.168.1.50): " PROXY_IP
     
-    if [ "$PKG_MANAGER" == "apt" ]; then
-        apt update && apt install -y curl wget git build-essential
-        if ! command -v node &> /dev/null; then
-            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-            apt install -y nodejs
-        fi
-    elif [ "$PKG_MANAGER" == "yum" ]; then
-        # CentOS 7 фикс для vault репозиториев (если штатные зеркала уже не работают)
-        if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-            sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*
-            sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
-        fi
-
-        yum install -y epel-release
-        yum install -y curl wget git gcc-c++ make tar
-
-        if ! command -v node &> /dev/null; then
-            if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-                echo "CentOS 7 обнаружен. Установка специальной сборки Node.js 20 (glibc 2.17)..."
-                local NODE_VER="v20.18.0"
-                local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
-                
-                cd /tmp
-                wget "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}"
-                tar -xzf "$NODE_FILE" -C /usr/local --strip-components=1
-                rm -f "$NODE_FILE"
-                
-                # Принудительное обновление PATH для текущей сессии
-                export PATH="/usr/local/bin:$PATH"
-            else
-                echo "Настройка репозитория NodeSource..."
-                curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
-                yum install -y nodejs --allowerasing
-            fi
-        fi
-        
-        # Проверка работоспособности node
-        if node -v &> /dev/null; then
-            echo -e "${C_GREEN}Node.js установлен: $(node -v)${C_NC}"
-        else
-            echo -e "${C_RED}Ошибка: Node.js не работает. Проверьте совместимость glibc.${C_NC}"
-            exit 1
-        fi
+    if [ -z "$PROXY_IP" ]; then
+        echo -e "${C_YELLOW}Прокси пропущен. Прямое соединение.${C_NC}"
+        USE_PROXY_FLAG=false
+        PREFIX=""
+        return 0
     fi
-}
 
-fn_install_proxychains() {
-    echo -e "${C_YELLOW}--- 2. Настройка Proxychains ---${C_NC}"
-    
+    echo "Установка proxychains-ng..."
     if ! command -v proxychains4 &> /dev/null; then
         if [ "$PKG_MANAGER" == "apt" ]; then
-            apt install -y proxychains-ng
+            apt-get install -y proxychains-ng >/dev/null 2>&1
             PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"
         elif [ "$PKG_MANAGER" == "yum" ]; then
-            yum install -y proxychains-ng
-            if [ -f /etc/proxychains4.conf ]; then 
-                PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"
-            else 
-                PROXYCHAINS_CONF_FILE="/etc/proxychains.conf"
-            fi
+            yum install -y proxychains-ng >/dev/null 2>&1
+            PROXYCHAINS_CONF_FILE=$(find /etc -name "proxychains*.conf" | head -n 1)
+            [ -z "$PROXYCHAINS_CONF_FILE" ] && PROXYCHAINS_CONF_FILE="/etc/proxychains.conf"
         fi
     else
         PROXYCHAINS_CONF_FILE=$(find /etc -name "proxychains*.conf" | head -n 1)
     fi
 
-    echo -e "Если нужен SOCKS5 прокси для Claude, введите IP. Если нет - нажмите Enter."
-    read -p "IP SOCKS5 прокси: " PROXY_IP
+    read -sp "Пароль для пользователя '$PROXY_USER' (Enter если без пароля): " PROXY_PASS
+    echo
     
-    if [ ! -z "$PROXY_IP" ]; then
-        read -sp "Пароль пользователя '$PROXY_USER': " PROXY_PASS
-        echo
-        cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak" 2>/dev/null
-        
-        cat << EOF > "$PROXYCHAINS_CONF_FILE"
-dynamic_chain
+    cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak" 2>/dev/null
+    
+    cat << EOF > "$PROXYCHAINS_CONF_FILE"
+strict_chain
 quiet_mode
 #proxy_dns 
 remote_dns_subnet 224
@@ -160,16 +114,52 @@ tcp_connect_time_out 8000
 [ProxyList]
 socks5 $PROXY_IP 1080 $PROXY_USER $PROXY_PASS
 EOF
-        echo -e "${C_GREEN}Proxychains настроен.${C_NC}"
-        USE_PROXY_FLAG=true
-    else
-        echo -e "${C_YELLOW}Прокси не задан. Используется прямое соединение.${C_NC}"
-        USE_PROXY_FLAG=false
-    fi
+    echo -e "${C_GREEN}Proxychains сконфигурирован: $PROXY_IP${C_NC}"
+    USE_PROXY_FLAG=true
+    PREFIX="proxychains4 "
 }
 
+# ==============================================================================
+# ПОДГОТОВКА СИСТЕМЫ (РАЗДЕЛЕНИЕ ПРОФИЛЕЙ)
+# ==============================================================================
+
+fn_prepare_minimal() {
+    echo -e "${C_YELLOW}--- 1. Проверка базовых утилит (Безопасный режим Bitrix) ---${C_NC}"
+    if [ "$PKG_MANAGER" == "apt" ]; then
+        apt-get update >/dev/null 2>&1
+        apt-get install -y curl wget tar xz-utils >/dev/null 2>&1
+    elif [ "$PKG_MANAGER" == "yum" ]; then
+        if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
+            sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* 2>/dev/null
+            sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-* 2>/dev/null
+        fi
+        yum install -y curl wget tar xz >/dev/null 2>&1
+    fi
+    echo -e "${C_GREEN}Базовые утилиты готовы.${C_NC}"
+}
+
+fn_prepare_full() {
+    echo -e "${C_YELLOW}--- 1. Установка полных зависимостей для разработки ---${C_NC}"
+    if [ "$PKG_MANAGER" == "apt" ]; then
+        apt-get update
+        apt-get install -y curl wget git build-essential xz-utils jq htop tmux python3 python3-venv python3-pip
+    elif [ "$PKG_MANAGER" == "yum" ]; then
+        if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
+            sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* 2>/dev/null
+            sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-* 2>/dev/null
+        fi
+        yum install -y epel-release
+        yum install -y curl wget git gcc-c++ make tar xz jq htop tmux python3 python3-pip
+    fi
+    echo -e "${C_GREEN}Зависимости установлены.${C_NC}"
+}
+
+# ==============================================================================
+# DOCKER
+# ==============================================================================
+
 fn_install_docker() {
-    echo -e "${C_YELLOW}--- 3. Установка Docker и Compose v2 ---${C_NC}"
+    echo -e "${C_YELLOW}--- Установка Docker и Compose v2 ---${C_NC}"
     
     if ! command -v docker &> /dev/null; then
         if [ "$PKG_MANAGER" == "apt" ]; then
@@ -185,129 +175,314 @@ fn_install_docker() {
         echo -e "${C_GREEN}Docker уже установлен.${C_NC}"
     fi
 
-    # Проверка плагина compose v2
-    if docker compose version &> /dev/null; then
-        echo -e "${C_GREEN}Docker Compose v2 доступен: $(docker compose version)${C_NC}"
-    else
-        echo -e "${C_RED}Docker Compose v2 не найден. Устанавливаем...${C_NC}"
-        DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
-        mkdir -p $DOCKER_CONFIG/cli-plugins
-        curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
-        chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+    if ! docker compose version &> /dev/null; then
+        echo -e "${C_YELLOW}Установка Docker Compose v2 плагина...${C_NC}"
+        DOCKER_CONFIG=${DOCKER_CONFIG:-/usr/libexec/docker/cli-plugins}
+        mkdir -p $DOCKER_CONFIG
+        curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/docker-compose
+        chmod +x $DOCKER_CONFIG/docker-compose
     fi
 }
 
-fn_install_tools() {
-    echo -e "${C_YELLOW}--- 4. Установка дополнительных утилит (Tools) ---${C_NC}"
-    if [ "$PKG_MANAGER" == "apt" ]; then
-        apt install -y jq htop tmux
-    elif [ "$PKG_MANAGER" == "yum" ]; then
-        yum install -y jq htop tmux
+# ==============================================================================
+# ИЗОЛИРОВАННЫЙ NODE.JS И CLAUDE CODE
+# ==============================================================================
+
+fn_install_nodejs_sandboxed() {
+    echo -e "${C_YELLOW}--- Развертывание изолированного Node.js 20 ---${C_NC}"
+    
+    local NODE_DIR="/opt/vibe-node"
+    if [ -d "$NODE_DIR/bin" ] && [ -x "$NODE_DIR/bin/node" ]; then
+        echo -e "${C_GREEN}Песочница Node.js уже существует в $NODE_DIR${C_NC}"
+        return 0
     fi
-    echo -e "${C_GREEN}Утилиты установлены.${C_NC}"
+
+    mkdir -p $NODE_DIR
+    cd /tmp
+
+    if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
+        echo "Режим CentOS 7: загрузка неофициальной сборки Node 20 (glibc 2.17)..."
+        local NODE_VER="v20.18.0"
+        local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
+        wget -q --show-progress "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}"
+        tar -xzf "$NODE_FILE" -C $NODE_DIR --strip-components=1
+        rm -f "$NODE_FILE"
+    else
+        echo "Загрузка официальной LTS сборки Node 20..."
+        local NODE_VER="v20.18.0"
+        local NODE_FILE="node-${NODE_VER}-linux-x64.tar.xz"
+        wget -q --show-progress "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}"
+        tar -xJf "$NODE_FILE" -C $NODE_DIR --strip-components=1
+        rm -f "$NODE_FILE"
+    fi
+
+    echo -e "${C_GREEN}Sandbox готов. Версия: $($NODE_DIR/bin/node -v)${C_NC}"
 }
 
 fn_install_claude_new() {
     local prefix_cmd="$1"
-    echo -e "${C_YELLOW}--- 5. Установка Claude Code ---${C_NC}"
+    echo -e "${C_YELLOW}--- Установка Claude Code (Wrapper Mode) ---${C_NC}"
     
-    if ! command -v npm &> /dev/null; then
-        echo -e "${C_RED}Ошибка: NPM не установлен. Проверьте установку Node.js.${C_NC}"
+    local NPM_BIN="/opt/vibe-node/bin/npm"
+
+    if [ ! -x "$NPM_BIN" ]; then
+        echo -e "${C_RED}[!] Критическая ошибка: NPM не найден в /opt/vibe-node.${C_NC}"
         exit 1
     fi
 
-    # На CentOS 7 при ручной установке Node npm уже в /usr/local/bin
+    echo "Установка @anthropic-ai/claude-code..."
     if [ -n "$prefix_cmd" ]; then
-        $prefix_cmd npm install -g @anthropic-ai/claude-code
+        $prefix_cmd $NPM_BIN install -g @anthropic-ai/claude-code
     else
-        npm install -g @anthropic-ai/claude-code
+        $NPM_BIN install -g @anthropic-ai/claude-code
     fi
     
-    if [ $? -eq 0 ]; then
-        echo -e "${C_GREEN}Claude успешно установлен!${C_NC}"
-        fn_update_shell_rc
+    cat << 'EOF' > /usr/local/bin/claude
+#!/bin/bash
+# VibeEnv Claude Wrapper - Полная изоляция от системного окружения (Bitrix Safe)
+unset NODE_ENV
+unset NODE_PATH
+export PATH="/opt/vibe-node/bin:$PATH"
+exec /opt/vibe-node/bin/claude "$@"
+EOF
+    chmod +x /usr/local/bin/claude
+    
+    if command -v claude &> /dev/null; then
+        echo -e "${C_GREEN}Установка успешна. Изолированный бинарник /usr/local/bin/claude активен.${C_NC}"
     else
-        echo -e "${C_RED}Ошибка установки через NPM.${C_NC}"
+        echo -e "${C_RED}[!] Ошибка проверки работоспособности claude.${C_NC}"
         exit 1
     fi
 }
 
-fn_update_shell_rc() {
-    echo -e "${C_YELLOW}--- 6. Обновление переменных окружения (.bashrc) ---${C_NC}"
-    local ADD_LINE='export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"'
+# ==============================================================================
+# PRESALE DEMO STACK
+# ==============================================================================
+
+fn_deploy_presale_stack() {
+    echo -e "${C_YELLOW}--- Развертывание Presale Demo Stack ---${C_NC}"
     
-    apply_to_file() {
-        local f="$1"
-        if [ -f "$f" ]; then
-            if ! grep -q "Vibe Coding Installer" "$f"; then
-                echo -e "\n# Added by Vibe Coding Installer" >> "$f"
-                echo "$ADD_LINE" >> "$f"
-                echo -e "${C_GREEN}Обновлен: $f${C_NC}"
-            fi
-        fi
+    read -p "Домен для Caddy (по умолчанию localhost): " APP_DOMAIN
+    APP_DOMAIN=${APP_DOMAIN:-localhost}
+    read -sp "Пароль для PostgreSQL (по умолчанию vibe2026): " DB_PASS
+    echo
+    DB_PASS=${DB_PASS:-vibe2026}
+
+    local DEMO_DIR="/opt/vibe-demo"
+    mkdir -p "$DEMO_DIR"/{docker,backend}
+
+    # 1. Docker Compose
+    cat << EOF > "$DEMO_DIR/docker/docker-compose.yml"
+version: '3.8'
+services:
+  caddy:
+    image: caddy:latest
+    container_name: vibe_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: vibe_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vibe_admin
+      POSTGRES_PASSWORD: $DB_PASS
+      POSTGRES_DB: vibe_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+EOF
+
+    # 2. Caddyfile
+    cat << EOF > "$DEMO_DIR/docker/Caddyfile"
+$APP_DOMAIN {
+    handle /api/* {
+        reverse_proxy host.docker.internal:8000
     }
+    handle /* {
+        reverse_proxy host.docker.internal:5173
+    }
+}
+EOF
 
-    apply_to_file "/root/.bashrc"
-    apply_to_file "/root/.zshrc"
+    # 3. Backend (FastAPI)
+    echo -e "${C_CYAN}Генерация FastAPI бэкенда...${C_NC}"
+    cd "$DEMO_DIR/backend"
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip >/dev/null 2>&1
+    pip install "fastapi[all]" >/dev/null 2>&1
+    
+    cat << EOF > .env
+DATABASE_URL=postgresql://vibe_admin:${DB_PASS}@localhost:5432/vibe_db
+EOF
 
-    if [ -n "$SUDO_USER" ]; then
-        local USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-        apply_to_file "$USER_HOME/.bashrc"
-        apply_to_file "$USER_HOME/.zshrc"
-    fi
+    cat << 'EOF' > main.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import os
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "service": "Vibe API is running", "db_configured": "DATABASE_URL" in os.environ}
+EOF
+    deactivate
+
+    # 4. Frontend (Vite)
+    echo -e "${C_CYAN}Генерация React + Vite...${C_NC}"
+    cd "$DEMO_DIR"
+    local NPM_BIN="/opt/vibe-node/bin/npm"
+    local NPX_BIN="/opt/vibe-node/bin/npx"
+
+    $NPX_BIN create-vite@latest frontend --template react-ts -y >/dev/null 2>&1
+    cd frontend
+    $NPM_BIN install >/dev/null 2>&1
+    
+    cat << 'EOF' > vite.config.ts
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    host: '0.0.0.0',
+    port: 5173,
+    hmr: {
+      clientPort: 443,
+    }
+  }
+})
+EOF
+
+    # 5. Tmux Launcher
+    echo -e "${C_CYAN}Создание скрипта запуска Tmux...${C_NC}"
+    cat << 'EOF' > "$DEMO_DIR/start_vibe.sh"
+#!/bin/bash
+cd /opt/vibe-demo/docker && docker compose up -d
+
+tmux new-session -d -s vibe_demo -n "backend"
+tmux send-keys -t vibe_demo:0 "cd /opt/vibe-demo/backend && source venv/bin/activate && set -a && source .env && set +a && uvicorn main:app --host 0.0.0.0 --port 8000 --reload" C-m
+
+tmux new-window -t vibe_demo:1 -n "frontend"
+tmux send-keys -t vibe_demo:1 "export PATH='/opt/vibe-node/bin:$PATH' && cd /opt/vibe-demo/frontend && npm run dev" C-m
+
+tmux attach-session -t vibe_demo
+EOF
+    chmod +x "$DEMO_DIR/start_vibe.sh"
 }
 
 # ==============================================================================
-# МЕНЮ
+# ИНТЕРАКТИВНОЕ МЕНЮ
 # ==============================================================================
 
-fn_show_logo
+fn_interactive_menu() {
+    clear
+    fn_show_logo
+    
+    if [ -f /etc/bitrixenv ]; then
+        echo -e "${C_YELLOW}[!] Обнаружен BitrixEnv. Включен режим глубокой изоляции (Sandbox).${C_NC}"
+        echo -e "${C_YELLOW}    Используй только Minimal Edition [1].${C_NC}"
+    fi
+
+    echo -e "${C_CYAN}======================================================================${C_NC}"
+    echo -e "                 ${C_YELLOW}МЕНЮ РАЗВЕРТЫВАНИЯ: СИСТЕМНЫЙ ИНТЕГРАТОР${C_NC}"
+    echo -e "${C_CYAN}======================================================================${C_NC}"
+    echo
+    echo -e "  ${C_GREEN}[1] Minimal Edition: Только Claude Code${C_NC}"
+    echo "      (Для клиентских серверов. Строгая изоляция Node.js + ИИ-ассистент)"
+    echo
+    echo -e "  ${C_BLUE}[2] Full VibeEnv Stack: Claude + Docker + Presale Demo${C_NC}"
+    echo "      (Полноценный стек для разработки и демо на новой машине)"
+    echo
+    echo -e "  ${C_YELLOW}[3] Infrastructure Only: Docker + Tools${C_NC}"
+    echo "      (Подготовка среды без установки Claude и демо-кода)"
+    echo
+    echo -e "  ${C_CYAN}[4] Proxy Reconfigure: Настройка сети${C_NC}"
+    echo "      (Изменить или отключить текущие настройки Proxychains)"
+    echo
+    echo -e "  [0] Выход"
+    echo
+    echo -e "${C_CYAN}======================================================================${C_NC}"
+    echo
+    
+    read -p " Выберите профиль (0-4): " CHOICE
+    echo
+
+    case $CHOICE in
+        1)
+            fn_setup_proxy
+            fn_prepare_minimal
+            fn_install_nodejs_sandboxed
+            fn_install_claude_new "$PREFIX"
+            ;;
+        2)
+            fn_setup_proxy
+            fn_prepare_full
+            fn_install_docker
+            fn_install_nodejs_sandboxed
+            fn_install_claude_new "$PREFIX"
+            fn_deploy_presale_stack
+            echo -e "${C_GREEN}Для запуска демо-стенда выполните: ${C_BLUE}/opt/vibe-demo/start_vibe.sh${C_NC}"
+            ;;
+        3)
+            fn_setup_proxy
+            fn_prepare_full
+            fn_install_docker
+            ;;
+        4)
+            fn_setup_proxy
+            exit 0
+            ;;
+        0)
+            echo "Отмена."
+            exit 0
+            ;;
+        *)
+            echo -e "${C_RED}Недопустимый код профиля.${C_NC}"
+            exit 1
+            ;;
+    esac
+
+    echo
+    echo -e "${C_GREEN}======================================================================${C_NC}"
+    echo -e "${C_GREEN}                      УСТАНОВКА ЗАВЕРШЕНА                             ${C_NC}"
+    echo -e "${C_GREEN}======================================================================${C_NC}"
+    
+    if [[ "$CHOICE" == "1" || "$CHOICE" == "2" ]]; then
+        if [ "$USE_PROXY_FLAG" = true ]; then
+            echo -e "Авторизация: ${C_BLUE}proxychains4 claude login${C_NC}"
+        else
+            echo -e "Авторизация: ${C_BLUE}claude login${C_NC}"
+        fi
+    fi
+}
+
+# Запуск
 fn_check_root
 fn_detect_os
-
-echo "Выберите режим установки:"
-echo "  1) Claude Code (Только Claude)"
-echo "  2) Docker + Docker Compose (v2)"
-echo "  3) Настройка Proxychains"
-echo -e "${C_CYAN}  4) VIBE CODING PACK (Claude + Docker + Tools + Proxy)${C_NC}"
-echo
-read -p "Ваш выбор: " CHOICE
-
-PREFIX=""
-
-case $CHOICE in
-    1)
-        fn_install_proxychains
-        if [ "$USE_PROXY_FLAG" = true ]; then PREFIX="proxychains4"; fi
-        fn_update_system
-        fn_install_claude_new "$PREFIX"
-        ;;
-    2)
-        fn_update_system
-        fn_install_docker
-        ;;
-    3)
-        fn_install_proxychains
-        ;;
-    4)
-        echo -e "${C_CYAN}>>> Запуск полной установки Vibe Coding Pack <<<${C_NC}"
-        fn_update_system
-        fn_install_proxychains
-        if [ "$USE_PROXY_FLAG" = true ]; then PREFIX="proxychains4"; else PREFIX=""; fi
-        fn_install_tools
-        fn_install_docker
-        fn_install_claude_new "$PREFIX"
-        ;;
-    *)
-        echo -e "${C_RED}Неверный выбор.${C_NC}"
-        exit 1
-        ;;
-esac
-
-echo
-echo -e "${C_GREEN}=== УСТАНОВКА ЗАВЕРШЕНА ===${C_NC}"
-if [ "$USE_PROXY_FLAG" = true ]; then
-    echo -e "Запуск: ${C_BLUE}proxychains4 claude login${C_NC}"
-else
-    echo -e "Запуск: ${C_BLUE}claude login${C_NC}"
-fi
+fn_interactive_menu
