@@ -18,7 +18,9 @@ PKG_MANAGER=""
 OS_ID=""
 OS_VERSION=""
 PROXY_IP=""
+PROXY_PORT=""
 PROXY_USER="proxyuser"
+PROXY_PASS=""
 PROXYCHAINS_CONF_FILE=""
 USE_PROXY_FLAG=false
 PREFIX=""
@@ -76,13 +78,39 @@ fn_setup_proxy() {
     echo -e "${C_YELLOW}--- Настройка сетевого доступа (Proxychains) ---${C_NC}"
     echo "Для установки и работы Claude Code требуется SOCKS5 прокси (если доступ заблокирован)."
     echo -e "${C_CYAN}Нажмите [ENTER] для пропуска, если доступ прямой.${C_NC}"
-    read -p "IP адрес SOCKS5 прокси: " PROXY_IP
     
-    if [ -z "$PROXY_IP" ]; then
+    read -p "IP адрес и порт SOCKS5 прокси (например, 144.31.139.182:1080): " PROXY_INPUT
+    
+    if [ -z "$PROXY_INPUT" ]; then
         echo -e "${C_YELLOW}Прокси пропущен. Прямое соединение.${C_NC}"
         USE_PROXY_FLAG=false
         PREFIX=""
         return 0
+    fi
+
+    # Парсинг IP и порта
+    PROXY_IP=$(echo "$PROXY_INPUT" | cut -d: -f1)
+    PROXY_PORT=$(echo "$PROXY_INPUT" | cut -d: -s -f2)
+    
+    if [ -z "$PROXY_PORT" ]; then
+        PROXY_PORT=1080
+    fi
+
+    read -sp "Пароль для пользователя '$PROXY_USER' (Enter если без пароля): " PROXY_PASS
+    echo
+    
+    local PROXY_AUTH=""
+    if [ -n "$PROXY_PASS" ]; then
+        PROXY_AUTH="${PROXY_USER}:${PROXY_PASS}@"
+    fi
+
+    # ПРОВЕРКА СОЕДИНЕНИЯ (FAIL-FAST)
+    echo -e "${C_CYAN}Проверка соединения через SOCKS5 прокси (${PROXY_IP}:${PROXY_PORT})...${C_NC}"
+    if curl -x "socks5h://${PROXY_AUTH}${PROXY_IP}:${PROXY_PORT}" -fsSLk --connect-timeout 7 https://google.com >/dev/null; then
+        echo -e "${C_GREEN}✅ Соединение успешно установлено!${C_NC}"
+    else
+        echo -e "${C_RED}[!] Ошибка соединения с прокси-сервером. Проверьте IP, порт или пароль.${C_NC}"
+        exit 1
     fi
 
     if ! command -v proxychains4 &> /dev/null; then
@@ -97,9 +125,6 @@ fn_setup_proxy() {
     else
         PROXYCHAINS_CONF_FILE=$(find /etc -name "proxychains*.conf" | head -n 1)
     fi
-
-    read -sp "Пароль для пользователя '$PROXY_USER' (Enter если без пароля): " PROXY_PASS
-    echo
     
     cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak" 2>/dev/null
     
@@ -110,9 +135,9 @@ remote_dns_subnet 224
 tcp_read_time_out 15000
 tcp_connect_time_out 8000
 [ProxyList]
-socks5 $PROXY_IP 1080 $PROXY_USER $PROXY_PASS
+socks5 $PROXY_IP $PROXY_PORT $PROXY_USER $PROXY_PASS
 EOF
-    echo -e "${C_GREEN}Proxychains сконфигурирован: $PROXY_IP${C_NC}"
+    echo -e "${C_GREEN}Proxychains сконфигурирован: ${PROXY_IP}:${PROXY_PORT}${C_NC}"
     USE_PROXY_FLAG=true
     PREFIX="proxychains4 "
 }
@@ -181,7 +206,7 @@ fn_install_docker() {
 }
 
 # ==============================================================================
-# NODE.JS SANDBOX (CURL NATIVE PROXY)
+# NODE.JS SANDBOX И SMART CLAUDE INSTALLER
 # ==============================================================================
 
 fn_install_nodejs_sandboxed() {
@@ -194,29 +219,35 @@ fn_install_nodejs_sandboxed() {
     mkdir -p $NODE_DIR
     cd /tmp
 
-    # Формируем команду curl. Флаг -k отключает проверку сертификатов для EOL CentOS 7
-    local CURL_CMD="curl -fsSLk"
+    local PROXY_AUTH=""
+    if [ -n "$PROXY_PASS" ]; then
+        PROXY_AUTH="${PROXY_USER}:${PROXY_PASS}@"
+    fi
+
+    # Используем curl с флагом -# для отображения прогресс-бара
+    local CURL_CMD="curl -fLk -#"
     if [ "$USE_PROXY_FLAG" = true ]; then
-        echo "Используется нативный SOCKS5-прокси для загрузки..."
-        CURL_CMD="curl -fsSLk -x socks5h://${PROXY_USER}:${PROXY_PASS}@${PROXY_IP}:${PROXY_PORT}"
+        CURL_CMD="curl -fLk -# -x socks5h://${PROXY_AUTH}${PROXY_IP}:${PROXY_PORT}"
     fi
 
     if [ "$OS_ID" == "centos" ] && [ "$OS_VERSION" == "7" ]; then
-        echo "Скачивание специальной сборки Node 20 (glibc 2.17)..."
+        echo -e "${C_BLUE}Скачивание Node.js 20 (glibc 2.17)...${C_NC}"
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
         
-        $CURL_CMD "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}" -o "$NODE_FILE" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js. Проверьте доступность узла.${C_NC}"; exit 1; }
+        $CURL_CMD "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}" -o "$NODE_FILE" || { echo -e "\n${C_RED}[!] Ошибка скачивания архива Node.js. Сервер недоступен.${C_NC}"; exit 1; }
         
+        echo -e "${C_CYAN}Распаковка...${C_NC}"
         tar -xzf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     else
-        echo "Скачивание LTS сборки Node 20..."
+        echo -e "${C_BLUE}Скачивание LTS сборки Node.js 20...${C_NC}"
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64.tar.xz"
         
-        $CURL_CMD "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}" -o "$NODE_FILE" || { echo -e "${C_RED}[!] Ошибка скачивания архива Node.js.${C_NC}"; exit 1; }
+        $CURL_CMD "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}" -o "$NODE_FILE" || { echo -e "\n${C_RED}[!] Ошибка скачивания архива Node.js.${C_NC}"; exit 1; }
         
+        echo -e "${C_CYAN}Распаковка...${C_NC}"
         tar -xJf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     fi
@@ -389,7 +420,6 @@ EOF
 
     $NPX_BIN create-vite@latest frontend --template react-ts -y >/dev/null 2>&1
     cd frontend
-    # Добавляем recharts и lucide-react для быстрых дашбордов и UI
     $NPM_BIN install recharts lucide-react >/dev/null 2>&1
     
     cat << 'EOF' > vite.config.ts
