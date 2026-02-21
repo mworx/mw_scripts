@@ -198,14 +198,14 @@ fn_install_nodejs_sandboxed() {
         echo "Скачивание специальной сборки Node 20 (glibc 2.17)..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64-glibc-217.tar.gz"
-        wget -q --show-progress "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}"
+        wget -q "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/${NODE_FILE}"
         tar -xzf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     else
         echo "Скачивание LTS сборки Node 20..."
         local NODE_VER="v20.18.0"
         local NODE_FILE="node-${NODE_VER}-linux-x64.tar.xz"
-        wget -q --show-progress "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}"
+        wget -q "https://nodejs.org/dist/${NODE_VER}/${NODE_FILE}"
         tar -xJf "$NODE_FILE" -C $NODE_DIR --strip-components=1
         rm -f "$NODE_FILE"
     fi
