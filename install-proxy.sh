@@ -498,6 +498,23 @@ EOF
 # ИНТЕРАКТИВНОЕ МЕНЮ
 # ==============================================================================
 
+fn_setup_devkit() {
+    echo
+    echo -e "${C_CYAN}--- Подключение к MEDIA WORKS DevKit ---${C_NC}"
+    echo "Claude Code на этом сервере будет вести журнал работ проекта: вход по рабочему e-mail (код придёт в Битрикс24),"
+    echo "выбор проекта, инструкции и хуки — из AdFlow."
+    read -p " Подключить сейчас? (y/N): " DK
+    if [[ "$DK" =~ ^[Yy]$ ]]; then
+        if [ "$USE_PROXY_FLAG" = true ]; then
+            proxychains4 -q curl -fsSL https://adflow.mworx.ru/api/v1/devkit/install.sh | proxychains4 -q bash || echo -e "${C_RED}DevKit не подключён — позже: curl -fsSL https://adflow.mworx.ru/api/v1/devkit/install.sh | bash${C_NC}"
+        else
+            curl -fsSL https://adflow.mworx.ru/api/v1/devkit/install.sh | bash || echo -e "${C_RED}DevKit не подключён — позже: curl -fsSL https://adflow.mworx.ru/api/v1/devkit/install.sh | bash${C_NC}"
+        fi
+    else
+        echo "Пропущено. Подключить позже: curl -fsSL https://adflow.mworx.ru/api/v1/devkit/install.sh | bash"
+    fi
+}
+
 fn_interactive_menu() {
     clear
     fn_show_logo
@@ -531,6 +548,7 @@ fn_interactive_menu() {
             fn_setup_proxy
             fn_prepare_minimal
             fn_install_claude_smart "$PREFIX"
+            fn_setup_devkit
             ;;
         2)
             fn_setup_proxy
@@ -538,12 +556,14 @@ fn_interactive_menu() {
             fn_install_docker
             fn_install_claude_smart "$PREFIX"
             fn_deploy_presale_stack
+            fn_setup_devkit
             ;;
         3)
             fn_setup_proxy
             fn_prepare_full
             fn_install_docker
             fn_install_claude_smart "$PREFIX"
+            fn_setup_devkit
             ;;
         4)
             fn_setup_proxy
