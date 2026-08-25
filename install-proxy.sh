@@ -15,7 +15,7 @@ PROXY_IP=""; PROXY_PORT=""; PROXY_USER="proxyuser"; PROXY_PASS=""; PROXYCHAINS_C
 USE_PROXY_FLAG=false; PREFIX=""
 OPT_PROFILE=""; OPT_PROXY=""; OPT_YES=false; OPT_DRY=false; OPT_KEEP_LEGACY=false; OPT_DOMAIN=""; OPT_DBPASS=""
 LOG="/var/log/mw-install.log"
-if { : </dev/tty; } 2>/dev/null; then IN=/dev/tty; else IN=/dev/stdin; fi
+if { : </dev/tty; } 2>/dev/null; then IN=/dev/tty; else exec 3<&0; IN=/dev/fd/3; fi   # ответы читаем с терминала; без него — из исходного stdin (fd 3, не зависит от here-string в циклах)
 NATIVE_OK=true; OPT_METHOD="auto"
 
 for _a in "$@"; do [ "$_a" = "--ascii" ] && export MW_ASCII=1; done
