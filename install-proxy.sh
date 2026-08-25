@@ -31,23 +31,23 @@ if [ -z "${MW_ASCII:-}" ]; then
 else
     S_OK='OK'; S_FAIL='X'; S_ARR='->'; S_DOT='*'; S_LINE='-'; S_SPIN='|/-\'
 fi
-COLS=$(tput cols 2>/dev/null || echo 80); [ "$COLS" -gt 100 ] && COLS=100
+COLS=$(tput cols 2>/dev/null || echo 87); [ "$COLS" -gt 87 ] && COLS=87
 hr()   { local l="" i; for ((i=0; i<COLS; i++)); do l+="$S_LINE"; done; printf '%s%s%s\n' "$C_DIM" "$l" "$C_NC"; }
 STEP_N=0; STEP_TOTAL=0
-step() { STEP_N=$((STEP_N+1)); echo; printf '%s[%s/%s] %s%s\n' "$C_BOLD" "$STEP_N" "${STEP_TOTAL:-?}" "$1" "$C_NC"; hr; echo "$(date '+%F %T') === [$STEP_N] $1" >> "$LOG" 2>/dev/null; }
+step() { STEP_N=$((STEP_N+1)); echo; printf '  %s%s %s%s %s%s/%s%s\n' "$C_CYAN" "$S_DOT" "$C_BOLD" "$1" "$C_DIM" "$STEP_N" "${STEP_TOTAL:-?}" "$C_NC"; echo "$(date '+%F %T') === [$STEP_N] $1" >> "$LOG" 2>/dev/null; }
 log()  { echo -e "$1"; echo -e "$(date '+%F %T') $1" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG" 2>/dev/null; }
 info() { log "   $1"; }
 ok()   { log "   ${C_GREEN}${S_OK}${C_NC} $1"; }
 warn() { log "   ${C_YELLOW}!${C_NC} $1"; }
 err()  { log "   ${C_RED}${S_FAIL} $1${C_NC}"; }
-run()  { if $OPT_DRY; then echo "   ${C_DIM}[dry-run] $*${C_NC}"; return 0; fi; echo "$(date '+%F %T') \$ $*" >> "$LOG"; eval "$@"; }
+run()  { if $OPT_DRY; then echo "   ${C_DIM}[dry-run] $*${C_NC}"; return 0; fi; echo "$(date '+%F %T') \$ $*" >> "$LOG"; eval "$@" </dev/null; }
 # spin "описание" команда… — спиннер и время; весь вывод команды в лог; таймаут SPIN_TIMEOUT (сек, по умолчанию 900)
 spin() {
     local title="$1"; shift
     if $OPT_DRY; then echo "   ${C_DIM}[dry-run] $title: $*${C_NC}"; return 0; fi
     echo "$(date '+%F %T') >>> $title: $*" >> "$LOG"
     local start=$(date +%s) limit="${SPIN_TIMEOUT:-900}" rc
-    ( eval "$@" ) >>"$LOG" 2>&1 & local pid=$! i=0
+    ( eval "$@" ) </dev/null >>"$LOG" 2>&1 & local pid=$! i=0
     while kill -0 "$pid" 2>/dev/null; do
         if [ $(( $(date +%s) - start )) -ge "$limit" ]; then kill "$pid" 2>/dev/null; pkill -P "$pid" 2>/dev/null; sleep 1; kill -9 "$pid" 2>/dev/null; echo "$(date '+%F %T') !!! таймаут ${limit}s: $title" >> "$LOG"; [ -t 1 ] && printf '\r\033[K'; err "$title — таймаут ${limit}s (подробности: $LOG)"; return 124; fi
         [ -t 1 ] && printf '\r   %s%s%s %s… %ss' "$C_CYAN" "${S_SPIN:$((i % ${#S_SPIN})):1}" "$C_NC" "$title" "$(( $(date +%s) - start ))"; i=$((i+1)); sleep 0.25
@@ -57,11 +57,12 @@ spin() {
     if [ $rc -eq 0 ]; then ok "$title ${C_DIM}(${dur}s)${C_NC}"; else err "$title — ошибка (${dur}s), подробности: $LOG"; fi
     return $rc
 }
-ask()  { local q="$1" def="${2:-N}" a; if $OPT_YES; then [[ "$def" =~ ^[Yy]$ ]]; return; fi; read -p "   $q " a <"$IN"; a=${a:-$def}; [[ "$a" =~ ^[Yy]$ ]]; }
-# choose "Вопрос" "по умолчанию" "буква:описание" … → CHOSEN
-choose() { local q="$1" def="$2"; shift 2; local opts=("$@") a opt; echo "   $q"; for opt in "${opts[@]}"; do if [ "${opt%%:*}" = "$def" ]; then printf '     %s[%s]%s %s %s(по умолчанию)%s\n' "$C_BOLD" "${opt%%:*}" "$C_NC" "${opt#*:}" "$C_DIM" "$C_NC"; else printf '     [%s] %s\n' "${opt%%:*}" "${opt#*:}"; fi; done
+ask()  { local q="$1" def="${2:-N}" a; if $OPT_YES; then [[ "$def" =~ ^[Yy]$ ]]; return; fi; echo; read -p "   ${C_BOLD}$q${C_NC} " a <"$IN"; a=${a:-$def}; [[ "$a" =~ ^[YyДд]$ ]]; }
+# choose "Вопрос" "номер по умолчанию" "описание" … → CHOSEN (номер, начиная с 1)
+choose() { local q="$1" def="$2"; shift 2; local opts=("$@") a i=0 opt; echo; printf '   %s%s%s\n' "$C_BOLD" "$q" "$C_NC"
+           for opt in "${opts[@]}"; do i=$((i+1)); if [ "$i" = "$def" ]; then printf '     %s%s%s  %s   %s%s%s\n' "$C_CYAN" "$i" "$C_NC" "$opt" "$C_DIM" "$S_ARR Enter" "$C_NC"; else printf '     %s%s%s  %s\n' "$C_CYAN" "$i" "$C_NC" "$opt"; fi; done
            if $OPT_YES; then CHOSEN="$def"; return; fi
-           while true; do read -p "     ${S_ARR} " a <"$IN"; a=${a:-$def}; a=$(echo "$a" | tr 'A-Z' 'a-z'); for opt in "${opts[@]}"; do [ "${opt%%:*}" = "$a" ] && { CHOSEN="$a"; return; }; done; echo "     Введите одну из букв."; done; }
+           while true; do read -p "     ${S_ARR} " a <"$IN"; a=${a:-$def}; [[ "$a" =~ ^[0-9]+$ ]] && [ "$a" -ge 1 ] && [ "$a" -le ${#opts[@]} ] && { CHOSEN="$a"; return; }; echo "     Введите номер 1–${#opts[@]}."; done; }
 
 # ==============================================================================
 # БАЗА
@@ -194,7 +195,7 @@ fn_urlenc() { python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.
 
 fn_direct_test() {   # без прокси: доступен ли claude.ai напрямую
     local code; code=$(curl -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
-    if [ "$code" = "200" ]; then NATIVE_OK=true; else NATIVE_OK=false; warn "claude.ai напрямую: HTTP ${code:-нет связи} — нативный установщик недоступен, будет npm"; fi
+    if [ "$code" = "200" ]; then NATIVE_OK=true; else NATIVE_OK=false; info "${C_DIM}claude.ai напрямую закрыт — Claude поставим через npm${C_NC}"; fi
 }
 
 fn_proxy_test() {   # 0 — интернет есть; NATIVE_OK=false, если claude.ai не отдаёт установщик (403 Cloudflare для датацентровых IP)
@@ -219,7 +220,7 @@ fn_proxy_from_adflow() {   # параметры SOCKS5 из AdFlow по личн
     fn_ensure_adflow_cli || return 1
     if [ -z "${ADFLOW_DEV_KEY:-}" ] && [ ! -s /root/.config/mw-devkit/key ]; then
         info "${C_DIM}настройки сети хранятся в AdFlow и выдаются после входа в DevKit${C_NC}"
-        if ask "Войти в DevKit сейчас (рабочий e-mail, код придёт в Битрикс24)? (Y/n):" Y; then adflow login <"$IN" >/dev/null || return 1; else return 1; fi
+        if ask "Войти в DevKit сейчас? Код придёт в Битрикс24 (Y/n):" Y; then fn_devkit_login root || return 1; else return 1; fi
     fi
     local js; js=$(adflow proxy 2>>"$LOG") || return 1
     echo "$js" | grep -q '"configured": true' || { warn "в AdFlow прокси не настроен (devkit.proxy)"; return 1; }
@@ -236,27 +237,27 @@ fn_setup_proxy() {
     elif [ -n "$OPT_PROXY" ]; then
         PROXY_IP=$(echo "$OPT_PROXY" | cut -d: -f1); PROXY_PORT=$(echo "$OPT_PROXY" | cut -d: -f2); PROXY_PASS=$(echo "$OPT_PROXY" | cut -d: -s -f3-)
     elif fn_proxy_read_existing; then
-        if ! ask "Прокси уже настроен: ${PROXY_IP}:${PROXY_PORT} — использовать? (Y/n):" Y; then PROXY_IP=""; fi
+        choose "Сеть: прокси ${PROXY_IP}:${PROXY_PORT} уже настроен" 1 "Использовать его" "Настроить заново"
+        [ "$CHOSEN" = 2 ] && PROXY_IP=""
     fi
     if [ -z "$PROXY_IP" ] && [ "$OPT_PROXY" != "none" ]; then
         local direct; direct=$(curl -sSL -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 https://claude.ai/install.sh 2>>"$LOG")
-        if [ "$direct" = "200" ]; then ok "claude.ai доступен напрямую — прокси не нужен"; NATIVE_OK=true; USE_PROXY_FLAG=false; PREFIX=""; return 0; fi
-        info "claude.ai напрямую: HTTP ${direct:-нет связи}"
+        if [ "$direct" = "200" ]; then ok "Интернет есть, claude.ai открывается напрямую — прокси не нужен"; NATIVE_OK=true; USE_PROXY_FLAG=false; PREFIX=""; return 0; fi
         if fn_adflow_direct; then
-            choose "Откуда взять настройки прокси?" "a" "a:из AdFlow (после входа в DevKit)" "m:ввести вручную" "n:без прокси"
-            case "$CHOSEN" in a) fn_proxy_from_adflow || warn "не получилось — введите вручную";; n) USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0;; esac
+            choose "claude.ai отсюда не открывается. Прокси:" 1 "Взять из AdFlow (после входа в DevKit)" "Ввести вручную" "Работать без прокси"
+            case "$CHOSEN" in 1) fn_proxy_from_adflow || warn "не получилось — введите вручную";; 3) USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0;; esac
         fi
     fi
     if [ -z "$PROXY_IP" ]; then
         if $OPT_YES; then USE_PROXY_FLAG=false; PREFIX=""; warn "Прокси не задан — прямое соединение."; fn_direct_test; return 0; fi
-        read -p "   SOCKS5 прокси IP:порт (Enter — прямое соединение): " PROXY_INPUT <"$IN"
+        echo; read -p "   ${C_BOLD}SOCKS5 прокси IP:порт${C_NC} ${C_DIM}(Enter — без прокси)${C_NC}: " PROXY_INPUT <"$IN"
         if [ -z "$PROXY_INPUT" ]; then USE_PROXY_FLAG=false; PREFIX=""; warn "Прямое соединение."; fn_direct_test; return 0; fi
         PROXY_IP=$(echo "$PROXY_INPUT" | cut -d: -f1); PROXY_PORT=$(echo "$PROXY_INPUT" | cut -d: -s -f2); [ -z "$PROXY_PORT" ] && PROXY_PORT=1080
         read -sp "   Пароль $PROXY_USER (Enter — без пароля): " PROXY_PASS <"$IN"; echo
     fi
     [ -z "$PROXY_PORT" ] && PROXY_PORT=1080
     if spin "Проверка прокси ${PROXY_IP}:${PROXY_PORT}" fn_proxy_test; then :; else err "Через прокси не открываются ни claude.ai, ни registry.npmjs.org — проверьте IP/порт/пароль."; exit 1; fi
-    $NATIVE_OK || warn "claude.ai через этот прокси отвечает не 200 (обычно 403 Cloudflare) — нативный установщик недоступен, Claude ставится через npm (registry.npmjs.org)."
+    $NATIVE_OK || info "${C_DIM}claude.ai через этот прокси закрыт — Claude поставим через npm${C_NC}"
 
     if ! command -v proxychains4 >/dev/null 2>&1; then
         [ "$PKG_MANAGER" = "apt" ] && apt-get update >>"$LOG" 2>&1
@@ -382,6 +383,14 @@ chmod 755 /usr/local/bin/claude"
     return 0
 }
 
+fn_fix_claude_path() {   # старые ссылки npm (/usr/bin/claude → node_modules) после замены нативной: перевести на /usr/local/bin/claude
+    for lnk in /usr/bin/claude /usr/local/bin/claude; do
+        if [ -L "$lnk" ] && [ ! -e "$lnk" ]; then run "rm -f '$lnk'"; fi
+    done
+    if [ ! -e /usr/bin/claude ] && [ -x /usr/local/bin/claude ]; then run "ln -s /usr/local/bin/claude /usr/bin/claude"; fi
+    hash -r 2>/dev/null
+}
+
 fn_expose_claude_globally() {   # /usr/local/bin/claude как копия/обёртка, доступная всем пользователям
     local src="$1"
     if [ -L /usr/local/bin/claude ] || [ ! -e /usr/local/bin/claude ] || grep -q 'vibe-node\|exec ' /usr/local/bin/claude 2>/dev/null; then
@@ -400,7 +409,8 @@ fn_install_claude_smart() {   # auto: нативный → при недосту
     else
         fn_install_claude_npm || { err "npm-установка не удалась (см. $LOG)"; exit 1; }
     fi
-    ok "Claude Code $(fn_claude_version /usr/local/bin/claude 2>/dev/null || fn_claude_version "$(command -v claude)") ${S_ARR} /usr/local/bin/claude"
+    fn_fix_claude_path
+    ok "Claude Code ${C_BOLD}$(fn_claude_version /usr/local/bin/claude 2>/dev/null || fn_claude_version "$(command -v claude)")${C_NC} установлен"
 }
 
 # ==============================================================================
@@ -410,48 +420,52 @@ PLAN=()            # строки плана «что сделаем»
 PLAN_CLAUDE=()     # path|type|owner|action  (update|native|skip)
 PLAN_USERS=()      # user|home|devkit(login|update|skip)|legacy(off|keep)
 
-fn_type_label() { case "$1" in native) echo "нативная";; npm-sandbox) echo "npm (песочница /opt/vibe-node)";; npm-global) echo "npm -g (системный Node)";; npm-local) echo "старая ~/.claude/local";; wrapper) echo "обёртка";; symlink*) echo "симлинк";; *) echo "$1";; esac; }
+fn_type_label() { case "$1" in native) echo "официальная установка";; npm-sandbox) echo "через npm (песочница)";; npm-global) echo "через npm (устаревший способ)";; npm-local) echo "старая установка ~/.claude/local";; wrapper) echo "обёртка";; symlink*) echo "ссылка";; *) echo "$1";; esac; }
 
 fn_wizard_claude() {
     step "Claude Code"
     local list; list=$(fn_discover_claude)
     if [ -z "$list" ]; then
         warn "Установок Claude не найдено."
-        if ask "Установить Claude Code сейчас? (Y/n):" Y; then PLAN+=("Установить Claude Code ($(fn_is_centos7 && echo 'npm-песочница, CentOS 7' || echo 'нативно'))"); PLAN_CLAUDE+=("|install|root|install"); fi
+        if ask "Установить Claude Code? (Y/n):" Y; then PLAN+=("Установить Claude Code"); PLAN_CLAUDE+=("|install|root|install"); fi
         return 0
     fi
-    local latest; latest=$(${PREFIX}curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    printf '   %s%-3s %-48s %-28s %-9s %s%s\n' "$C_DIM" "#" "ПУТЬ" "ТИП" "ВЕРСИЯ" "КТО" "$C_NC"
+    local latest; latest=$(${PREFIX}curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null </dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     local i=0
-    while IFS='|' read -r p t v o; do i=$((i+1)); local mark=""; [ -n "$latest" ] && [ "$v" = "$latest" ] && mark=" ${C_GREEN}${S_OK}${C_NC}"; printf '   %-3s %-48s %-28s %-9s %s%s\n' "$i" "$p" "$(fn_type_label "$t")" "${v:-?}" "$o" "$mark"; done <<<"$list"
-    [ -n "$latest" ] && info "${C_DIM}последняя версия: $latest; способ установки: $($NATIVE_OK && echo 'нативный или npm' || echo 'только npm — claude.ai недоступен через сеть')${C_NC}"
-    echo
-    choose "Что сделать?" "a" "a:обновить все до последней версии (рекомендуется)" "o:решить по каждой" "s:пропустить этот шаг"
-    local mode="$CHOSEN"
-    [ "$mode" = "s" ] && return 0
+    while IFS='|' read -r p t v o; do [[ "$t" == wrapper || "$t" == symlink* ]] && continue; i=$((i+1))
+        local mark=""
+        if [ "$t" = native ]; then mark="${C_DIM}официальный канал обновлений${C_NC}"
+        elif [ -n "$latest" ] && [ "$v" = "$latest" ]; then mark="${C_GREEN}$S_OK актуальная${C_NC}"
+        elif [ -n "$latest" ]; then mark="${C_YELLOW}есть новее: $latest${C_NC}"; fi
+        printf '   %s%s%s  Claude Code %s%s%s %s %s%s%s   %s\n' "$C_CYAN" "$i" "$C_NC" "$C_BOLD" "${v:-?}" "$C_NC" "$S_DOT" "$C_DIM" "$(fn_type_label "$t"), $o" "$C_NC" "$mark"
+        printf '      %s%s%s\n' "$C_DIM" "$p" "$C_NC"; done <<<"$list"
+    choose "Claude Code:" 1 "Обновить до последней версии" "Решить по каждой установке" "Оставить как есть"
+    local mode; case "$CHOSEN" in 1) mode=a;; 2) mode=o;; *) return 0;; esac
     while IFS='|' read -r p t v o; do
         [[ "$t" == wrapper || "$t" == symlink* ]] && continue      # обёртки/симлинки обновляются вместе с целью
         local act="update"
         if [ "$mode" = "o" ]; then
             if [[ "$t" == npm-global || "$t" == npm-local ]] && ! fn_is_centos7 && $NATIVE_OK; then
-                choose "$p ($(fn_type_label "$t"), ${v:-?}, $o):" "n" "n:заменить нативной установкой Anthropic (рекомендуется)" "u:обновить как есть через npm" "s:не трогать"
-            elif [ "$t" = native ] ; then
-                choose "$p (нативная, ${v:-?}, $o):" "u" "u:обновить (claude update)" "m:переустановить через npm" "s:не трогать"
+                choose "Claude ${v:-?} ($(fn_type_label "$t"), $o):" 1 "Заменить официальной установкой Anthropic" "Обновить как есть, через npm" "Не трогать"
+                case "$CHOSEN" in 1) act="native";; 2) act="update";; *) act="skip";; esac
+            elif [ "$t" = native ]; then
+                choose "Claude ${v:-?} (официальная, $o):" 1 "Обновить" "Переустановить через npm" "Не трогать"
+                case "$CHOSEN" in 1) act="update";; 2) act="npm";; *) act="skip";; esac
             else
-                choose "$p ($(fn_type_label "$t"), ${v:-?}, $o):" "u" "u:обновить через npm" "s:не трогать"
+                choose "Claude ${v:-?} ($(fn_type_label "$t"), $o):" 1 "Обновить через npm" "Не трогать"
+                case "$CHOSEN" in 1) act="update";; *) act="skip";; esac
             fi
-            case "$CHOSEN" in n) act="native";; u) act="update";; m) act="npm";; s) act="skip";; esac
         elif [[ "$t" == npm-global || "$t" == npm-local ]] && ! fn_is_centos7 && $NATIVE_OK; then act="native"; fi
         [ "$act" = "skip" ] && continue
         PLAN_CLAUDE+=("$p|$t|$o|$act")
         case "$act" in
-            update) PLAN+=("Обновить $p ($(fn_type_label "$t"), $o) до последней версии");;
-            native) PLAN+=("Заменить $p ($(fn_type_label "$t"), $o) нативной установкой; /usr/local/bin/claude ${S_ARR} нативный бинарник; при ошибке — npm");;
-            npm) PLAN+=("Переустановить $p через npm (registry.npmjs.org)");;
+            update) PLAN+=("Обновить Claude Code ($(fn_type_label "$t"), $o)");;
+            native) PLAN+=("Поставить официальный Claude Code вместо установки через npm ($o)");;
+            npm) PLAN+=("Переустановить Claude Code через npm ($o)");;
         esac
     done <<<"$list"
     if [ -L /usr/local/bin/claude ] && [[ "$(readlink -f /usr/local/bin/claude)" == /root/* ]]; then
-        PLAN+=("/usr/local/bin/claude: симлинк в /root/.local заменить копией (иначе другие пользователи не смогут запустить Claude)")
+        PLAN+=("Сделать Claude доступным всем пользователям сервера")
     fi
 }
 
@@ -467,28 +481,25 @@ fn_wizard_devkit() {
     step "MW DevKit"
     info "${C_DIM}вход по рабочему e-mail (код в Битрикс24); права — по роли в проекте; скилл и хуки — из AdFlow${C_NC}"
     local users=("root|/root"); for h in /home/*; do [ -d "$h/.claude" ] && users+=("$(stat -c %U "$h")|$h"); done
-    printf '   %s%-14s %-8s %-20s %s%s\n' "$C_DIM" "ПОЛЬЗОВАТЕЛЬ" "КЛЮЧ" "СТАРЫЙ backlog-add" "ПРОЕКТОВ" "$C_NC"
     for ent in "${users[@]}"; do IFS='|' read -r u h <<<"$ent"; IFS='|' read -r k l pr <<<"$(fn_user_devkit_state "$h")"
-        printf '   %-14s %-8s %-20s %s\n' "$u" "$([ $k = yes ] && echo есть || echo нет)" "$([ $l = yes ] && echo 'есть (Sheets)' || echo нет)" "$pr"; done
-    echo
+        printf '   %s%s%s  %s%s%s %s %s\n' "$C_CYAN" "$S_DOT" "$C_NC" "$C_BOLD" "$u" "$C_NC" "$S_DOT" "$([ $k = yes ] && echo "${C_GREEN}подключён${C_NC}" || echo "не подключён")$([ $l = yes ] && echo ", старый backlog-add (Google-таблица)")$([ "$pr" -gt 0 ] && echo ", проектов: $pr")"; done
     for ent in "${users[@]}"; do
         IFS='|' read -r u h <<<"$ent"; IFS='|' read -r k l pr <<<"$(fn_user_devkit_state "$h")"
         local dk="skip" lg="keep"
         if [ "$k" = yes ]; then
-            choose "$u — ключ есть:" "u" "u:обновить скилл и хуки" "s:не трогать"; [ "$CHOSEN" = u ] && dk="update"
+            choose "$u — DevKit уже подключён:" 1 "Обновить инструкции и хуки" "Не трогать"; [ "$CHOSEN" = 1 ] && dk="update"
         else
             if $OPT_YES; then warn "$u: DevKit не подключён — вход интерактивный, выполните позже: adflow login && adflow update"
-            else choose "$u — DevKit не подключён:" "$([ "$u" = root ] && echo l || echo s)" "l:подключить (e-mail, код из Битрикс24)" "s:позже (adflow login)"; [ "$CHOSEN" = l ] && dk="login"; fi
+            else choose "$u — подключить DevKit?" "$([ "$u" = root ] && echo 1 || echo 2)" "Да, сейчас (e-mail, код придёт в Битрикс24)" "Позже"; [ "$CHOSEN" = 1 ] && dk="login"; fi
         fi
         if [ "$l" = yes ]; then
             if $OPT_KEEP_LEGACY; then lg="keep"
-            else choose "$u — старый backlog-add (Google-таблица):" "$([ "$dk" = skip ] && echo k || echo o)" "o:отключить (скилл в бэкап, хук снять; sheets_sync и cron не трогаю)" "k:оставить"; [ "$CHOSEN" = o ] && lg="off"; fi
+            else choose "$u — старый backlog-add (Google-таблица):" "$([ "$dk" = skip ] && echo 2 || echo 1)" "Отключить — журнал теперь ведёт DevKit" "Оставить"; [ "$CHOSEN" = 1 ] && lg="off"; fi
         fi
         PLAN_USERS+=("$u|$h|$dk|$lg")
-        case "$dk" in login) PLAN+=("$u: adflow login (e-mail → код в Б24) + adflow update");; update) PLAN+=("$u: adflow update (скилл и хуки из AdFlow)");; esac
-        [ "$lg" = off ] && PLAN+=("$u: отключить старый backlog-add (бэкап скилла, снять Stop-хук)")
+        case "$dk" in login) PLAN+=("Подключить $u к DevKit (вход по e-mail, код из Битрикс24)");; update) PLAN+=("Обновить инструкции и хуки DevKit для $u");; esac
+        [ "$lg" = off ] && PLAN+=("Отключить старый backlog-add у $u (бэкап сохраняется)")
     done
-    PLAN+=("Установить/обновить утилиту adflow из AdFlow ($ADFLOW_URL)")
 }
 
 fn_apply_claude() {
@@ -512,7 +523,7 @@ fn_apply_claude() {
         esac
     done
     if [ -L /usr/local/bin/claude ] && [[ "$(readlink -f /usr/local/bin/claude)" == /root/* ]]; then fn_expose_claude_globally /root/.local/bin/claude; fi
-    echo; fn_discover_claude | while IFS='|' read -r p t v o; do printf '   %-52s %-9s %s\n' "$p" "${v:-?}" "$([ -n "$latest" ] && [ "$v" = "$latest" ] && echo "${C_GREEN}${S_OK} актуально${C_NC}" || echo '')"; done
+    fn_fix_claude_path
 }
 
 fn_migrate_legacy_backlog() {   # $1 home $2 user
@@ -525,21 +536,52 @@ for ev in list(h): h[ev]=[x for x in h[ev] if not any('check_backlog_called' in 
 json.dump(d,open(p,'w'),ensure_ascii=False,indent=2)
 PY"
     fi
-    [ -d "$h/.claude/sheets_sync" ] && warn "  $u: sheets_sync и его cron оставлены — выключите после первого закрытого таска в AdFlow (crontab -e)"
-    ok "  $u: старый backlog-add отключён — журнал работ ведёт DevKit"
+    [ -d "$h/.claude/sheets_sync" ] && info "${C_DIM}$u: sheets_sync и его cron оставлены — выключите после первого закрытого таска в AdFlow${C_NC}"
+    ok "Старый backlog-add у $u отключён — журнал работ теперь ведёт DevKit"
+}
+
+fn_as_user() { local u="$1"; shift; if [ "$u" = root ]; then "$@"; else su - "$u" -c "$*"; fi; }
+fn_json() { python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for k in '$1'.split('.'):
+    d=d.get(k) if isinstance(d,dict) else None
+print('' if d is None else d)" 2>/dev/null; }
+
+fn_devkit_login() {   # $1 = пользователь; красивый диалог входа, JSON CLI наружу не показываем
+    local u="$1" out
+    echo; printf '   %sВход в DevKit%s — %s: код придёт вам в Битрикс24 личным сообщением\n' "$C_BOLD" "$C_NC" "$u"
+    read -p "   Рабочий e-mail: " email <"$IN"; [ -z "$email" ] && { warn "e-mail не введён — пропускаю"; return 1; }
+    out=$(fn_as_user "$u" adflow login --email "$email" 2>/dev/null <"$IN") || { err "Вход не выполнен: $(echo "$out" | fn_json error)"; return 1; }
+    ok "Вы вошли как ${C_BOLD}$(echo "$out" | fn_json employee)${C_NC}"
+    return 0
+}
+
+fn_devkit_update() {   # $1 = пользователь
+    local u="$1" out
+    $OPT_DRY && { echo "   ${C_DIM}[dry-run] adflow update ($u)${C_NC}"; return 0; }
+    out=$(fn_as_user "$u" adflow update 2>/dev/null) || { warn "$u: инструкции не обновились: $(echo "$out" | fn_json error)"; return 1; }
+    ok "Инструкции и хуки Claude обновлены ${C_DIM}(версия $(echo "$out" | fn_json version))${C_NC}"
+}
+
+fn_devkit_link_prompt() {   # предложить привязать проект прямо сейчас
+    local u="$1" dir out
+    echo; read -p "   Каталог проекта для привязки ${C_DIM}(Enter — позже, командой adflow link)${C_NC}: " dir <"$IN"
+    [ -z "$dir" ] && return 0
+    [ -d "$dir" ] || { warn "каталога $dir нет — привяжете позже: cd <проект> && adflow link"; return 0; }
+    printf '   Ваши проекты в AdFlow:\n'; fn_as_user "$u" adflow projects 2>/dev/null | head -20 || true
+    read -p "   Код проекта: " code <"$IN"; [ -z "$code" ] && return 0
+    out=$(cd "$dir" && fn_as_user "$u" adflow link "$code" 2>/dev/null) && ok "Проект ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC} привязан к $dir" || warn "не привязан: $(echo "$out" | fn_json error)"
 }
 
 fn_apply_devkit() {
     command -v python3 >/dev/null 2>&1 || fn_prepare_minimal
-    spin "Утилита adflow из AdFlow" "${PREFIX}curl -fsSL --max-time 60 '$ADFLOW_URL/devkit/cli' -o /usr/local/bin/adflow && chmod 755 /usr/local/bin/adflow" || return 1
+    spin "Утилита adflow" "${PREFIX}curl -fsSL --max-time 60 '$ADFLOW_URL/devkit/cli' -o /usr/local/bin/adflow && chmod 755 /usr/local/bin/adflow" || return 1
     for ent in "${PLAN_USERS[@]}"; do
         IFS='|' read -r u h dk lg <<<"$ent"
         case "$dk" in
-            login) info "${S_ARR} $u: вход в DevKit"
-                if [ "$u" = root ]; then run "${PREFIX}adflow login <$IN && ${PREFIX}adflow update" || warn "  $u: не подключён — позже: adflow login && adflow update"
-                else run "su - '$u' -c '${PREFIX}adflow login <$IN && ${PREFIX}adflow update'" || warn "  $u: не подключён — позже под $u: adflow login && adflow update"; fi
-                warn "  $u: проект привязывается в каталоге репозитория: cd <проект> && adflow link" ;;
-            update) info "${S_ARR} $u: adflow update"; if [ "$u" = root ]; then run "${PREFIX}adflow update" || warn "  не удалось"; else run "su - '$u' -c '${PREFIX}adflow update'" || warn "  не удалось"; fi ;;
+            login) if fn_devkit_login "$u"; then fn_devkit_update "$u"; fn_devkit_link_prompt "$u"; else warn "$u: подключить позже — adflow login && adflow update"; fi ;;
+            update) fn_devkit_update "$u" ;;
         esac
         [ "$lg" = off ] && fn_migrate_legacy_backlog "$h" "$u"
     done
@@ -551,9 +593,9 @@ fn_update_wizard() {
     fn_wizard_devkit
     step "План"
     if [ ${#PLAN[@]} -eq 0 ]; then ok "Делать нечего."; return 0; fi
-    local n=0; for x in "${PLAN[@]}"; do n=$((n+1)); printf '   %s%2d.%s %s\n' "$C_BOLD" "$n" "$C_NC" "$x"; done
-    $OPT_DRY && warn "${C_DIM}--dry-run: команды только печатаются${C_NC}"
-    echo; ask "Выполнить? (Y/n):" Y || { warn "Отменено."; return 0; }
+    local n=0; for x in "${PLAN[@]}"; do n=$((n+1)); printf '   %s%s%s %s\n' "$C_CYAN" "$S_OK" "$C_NC" "$x"; done
+    $OPT_DRY && info "${C_DIM}режим проверки: команды только печатаются${C_NC}"
+    ask "Поехали? (Y/n):" Y || { warn "Отменено."; return 0; }
     step "Claude Code"; fn_apply_claude
     step "MW DevKit"; fn_apply_devkit
 }
@@ -711,12 +753,21 @@ EOF
 # МЕНЮ
 # ==============================================================================
 fn_finish_message() {
+    local cv; cv=$(fn_claude_version /usr/local/bin/claude 2>/dev/null || fn_claude_version "$(command -v claude 2>/dev/null)")
+    local who=""; [ -s /root/.config/mw-devkit/key ] && who=$(adflow whoami 2>/dev/null | fn_json employee)
     echo; hr
-    printf '   %s%s Готово%s   %sлог: %s%s\n' "$C_GREEN" "$S_OK" "$C_NC" "$C_DIM" "$LOG" "$C_NC"
+    printf '   %s%s%s  %sВсё готово%s\n' "$C_GREEN" "$S_OK" "$C_NC" "$C_BOLD" "$C_NC"
+    echo
+    if [ -n "$cv" ]; then printf '   %sClaude Code%s     версия %s\n' "$C_BOLD" "$C_NC" "$cv"; else printf '   %sClaude Code%s     не установлен\n' "$C_BOLD" "$C_NC"; fi
+    if [ -n "$who" ]; then printf '   %sDevKit%s          подключён как %s\n' "$C_BOLD" "$C_NC" "$who"; else printf '   %sDevKit%s          не подключён %s(adflow login)%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"; fi
+    $USE_PROXY_FLAG && printf '   %sСеть%s            через прокси %s:%s\n' "$C_BOLD" "$C_NC" "$PROXY_IP" "$PROXY_PORT"
+    echo
     local pc=""; $USE_PROXY_FLAG && pc="proxychains4 -q "
-    printf '   %s%s%s Claude:  %s%sclaude%s и команда %s/login%s\n' "$C_DIM" "$S_DOT" "$C_NC" "$C_BOLD" "$pc" "$C_NC" "$C_BOLD" "$C_NC"
-    printf '   %s%s%s Проект:  в каталоге репозитория %sadflow link%s\n' "$C_DIM" "$S_DOT" "$C_NC" "$C_BOLD" "$C_NC"
-    printf '   %s%s%s Работа:  в конце скажите Claude %s«закрой таск»%s\n' "$C_DIM" "$S_DOT" "$C_NC" "$C_BOLD" "$C_NC"
+    printf '   %sЧто дальше%s\n' "$C_BOLD" "$C_NC"
+    printf '   %s1%s  Запустите %s%sclaude%s, внутри — команда %s/login%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$pc" "$C_NC" "$C_BOLD" "$C_NC"
+    printf '   %s2%s  В каталоге проекта: %sadflow link%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC"
+    printf '   %s3%s  Работайте как обычно, в конце скажите Claude %s«закрой таск»%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC"
+    echo; printf '   %sЕсли в этой же сессии «claude» не находится — выполните hash -r или откройте новый терминал. Лог: %s%s\n' "$C_DIM" "$LOG" "$C_NC"
     hr
 }
 
@@ -724,17 +775,17 @@ fn_interactive_menu() {
     fn_show_logo
     local existing; existing=$(fn_discover_claude | head -n 3)
     if [ -n "$existing" ] && [ -z "$OPT_PROFILE" ]; then
-        printf '   %sна сервере уже есть Claude Code:%s\n' "$C_DIM" "$C_NC"; while IFS='|' read -r p t v o; do printf '     %s %s(%s, %s)%s\n' "$p" "$C_DIM" "$(fn_type_label "$t")" "${v:-?}" "$C_NC"; done <<<"$existing"; echo
+        while IFS='|' read -r p t v o; do [[ "$t" == wrapper || "$t" == symlink* ]] && continue; printf '   %sНа сервере уже есть Claude Code %s%s (%s)%s\n' "$C_DIM" "$C_NC" "${v:-?}" "$(fn_type_label "$t")" "$C_NC"; done <<<"$existing"; echo
     fi
-    printf '   %s[1]%s Claude Code + DevKit                 %sзакрытые серверы клиентов%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
-    printf '   %s[2]%s Full VibeEnv: Claude + Docker + Presale Demo\n' "$C_BOLD" "$C_NC"
-    printf '   %s[3]%s Docker + Tools + Claude\n' "$C_BOLD" "$C_NC"
-    printf '   %s[4]%s Настройка прокси\n' "$C_BOLD" "$C_NC"
-    printf '   %s[5]%s Обновить всё: Claude + DevKit        %sлюбые установки, старый backlog-add %s DevKit%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$S_ARR" "$C_NC"
-    printf '   %s[0]%s Выход\n' "$C_BOLD" "$C_NC"
+    printf '   %s1%s  Claude Code + DevKit               %sбыстрая установка на сервер клиента%s\n' "$C_CYAN" "$C_NC" "$C_DIM" "$C_NC"
+    printf '   %s2%s  Полный стенд                       %sClaude + Docker + демо-приложение для пресейла%s\n' "$C_CYAN" "$C_NC" "$C_DIM" "$C_NC"
+    printf '   %s3%s  Инфраструктура                     %sDocker + инструменты + Claude, без демо%s\n' "$C_CYAN" "$C_NC" "$C_DIM" "$C_NC"
+    printf '   %s4%s  Настроить сеть                     %sпрокси для закрытых серверов%s\n' "$C_CYAN" "$C_NC" "$C_DIM" "$C_NC"
+    printf '   %s5%s  Обновить всё                       %sClaude любых версий + DevKit, старый backlog-add %s DevKit%s\n' "$C_CYAN" "$C_NC" "$C_DIM" "$S_ARR" "$C_NC"
+    printf '   %s0%s  Выход\n' "$C_CYAN" "$C_NC"
     echo
     local CHOICE="$OPT_PROFILE"
-    [ -z "$CHOICE" ] && { read -p "   ${S_ARR} профиль (0-5): " CHOICE <"$IN"; }
+    [ -z "$CHOICE" ] && { read -p "   ${S_ARR} " CHOICE <"$IN"; }
     case "$CHOICE" in
         1) STEP_TOTAL=4; fn_setup_proxy; fn_prepare_minimal; fn_install_claude_smart; fn_setup_devkit ;;
         2) STEP_TOTAL=7; fn_setup_proxy; fn_prepare_full; fn_install_docker; fn_install_claude_smart; fn_deploy_presale_stack; fn_setup_devkit ;;
@@ -742,11 +793,11 @@ fn_interactive_menu() {
         4) STEP_TOTAL=1; fn_setup_proxy; exit 0 ;;
         5) STEP_TOTAL=7; fn_setup_proxy; fn_prepare_minimal; fn_update_wizard ;;
         0) echo "Отмена."; exit 0 ;;
-        *) err "Недопустимый код профиля."; exit 1 ;;
+        *) err "Введите номер пункта 0–5."; exit 1 ;;
     esac
     fn_finish_message
     if [ "$CHOICE" = "2" ] && [ -x "$DEMO_DIR/start_vibe.sh" ] && ! $OPT_YES && ! $OPT_DRY; then
-        echo -e "\n${C_YELLOW}Запускаю демо-стенд через 5 секунд (Ctrl+b, d — отключиться от tmux)…${C_NC}"; sleep 5; "$DEMO_DIR/start_vibe.sh"
+        echo; info "Запускаю демо-стенд через 5 секунд ${C_DIM}(Ctrl+b, d — отключиться от tmux)${C_NC}"; sleep 5; "$DEMO_DIR/start_vibe.sh"
     fi
 }
 
