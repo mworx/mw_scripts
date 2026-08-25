@@ -568,16 +568,16 @@ fn_devkit_update() {   # $1 = пользователь
 
 fn_devkit_link_prompt() {   # привязать проект прямо сейчас (можно пропустить)
     local u="$1" dir out state
-    echo; printf '   %sПроект%s — код даёт ПМ проекта; подтверждает подключение тоже ПМ (свой проект — сразу).\n' "$C_BOLD" "$C_NC"
+    echo; printf '   %sПроект%s — код проекта даёт ПМ; подключение подтверждается кодом, который придёт ПМу в Битрикс24.\n' "$C_BOLD" "$C_NC"
     read -p "   Каталог проекта ${C_DIM}(Enter — пропустить, позже: cd <проект> && adflow link)${C_NC}: " dir <"$IN"
     [ -z "$dir" ] && { info "${C_DIM}пока — гостевой режим: записи копятся на вас, ПМ привяжет их к проекту${C_NC}"; return 0; }
     [ -d "$dir" ] || { warn "каталога $dir нет — привяжете позже"; return 0; }
     read -p "   Код проекта ${C_DIM}(Enter — гостевой режим)${C_NC}: " code <"$IN"
     if [ -z "$code" ]; then (cd "$dir" && fn_as_user "$u" adflow link --guest >/dev/null 2>&1); ok "Гостевой режим в $dir — ПМ привяжет записи к проекту"; return 0; fi
-    out=$(cd "$dir" && fn_as_user "$u" adflow link "$code" 2>/dev/null); state=$(echo "$out" | fn_json state)
+    out=$(cd "$dir" && fn_as_user "$u" adflow link "$code" <"$IN"); state=$(echo "$out" | fn_json state)
     case "$state" in
         approved) ok "Проект ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC} подключён к $dir" ;;
-        pending)  ok "Запрос отправлен ПМу проекта ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC}; до подтверждения — гостевой режим" ;;
+        pending)  ok "Проект ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC}: ждёт подтверждения (код у ПМа или кнопка в AdFlow); пока — гостевой режим. Повторить позже: cd $dir && adflow link $code" ;;
         *)        warn "не подключён: $(echo "$out" | fn_json error)" ;;
     esac
 }
@@ -773,7 +773,7 @@ fn_finish_message() {
     local pc=""; $USE_PROXY_FLAG && pc="proxychains4 -q "
     printf '   %sЧто дальше%s\n' "$C_BOLD" "$C_NC"
     printf '   %s1%s  Запустите %s%sclaude%s, внутри — команда %s/login%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$pc" "$C_NC" "$C_BOLD" "$C_NC"
-    printf '   %s2%s  В каталоге проекта: %sadflow link <код проекта>%s %s(код даёт ПМ; или adflow link --guest)%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
+    printf '   %s2%s  В каталоге проекта: %sadflow link <код проекта>%s %s(подтверждается кодом из Битрикс24 у ПМа; или adflow link --guest)%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
     printf '   %s3%s  Работайте как обычно, в конце скажите Claude %s«закрой таск»%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC"
     echo; printf '   %sЕсли в этой же сессии «claude» не находится — выполните hash -r или откройте новый терминал. Лог: %s%s\n' "$C_DIM" "$LOG" "$C_NC"
     hr
