@@ -2,7 +2,8 @@
 # ==============================================================================
 # Установщик MEDIA WORKS: Claude Code, MW DevKit, Docker & Presale Demo Stack
 #   bash install-proxy.sh                      — интерактивное меню
-#   bash install-proxy.sh --profile 5 --yes    — обновить все установки Claude + DevKit без вопросов
+#   bash install-proxy.sh update               — мастер обновления: все установки Claude + DevKit (с вопросами)
+#   bash install-proxy.sh update --yes         — то же без вопросов (рекомендуемые ответы)
 #   Флаги: --profile N | --proxy IP:PORT[:пароль] | --no-proxy | --yes | --dry-run | --keep-legacy | --domain D | --db-pass P
 # ==============================================================================
 set -o pipefail
@@ -22,7 +23,13 @@ ok()   { log "${C_GREEN}$1${C_NC}"; }
 warn() { log "${C_YELLOW}$1${C_NC}"; }
 err()  { log "${C_RED}[!] $1${C_NC}"; }
 run()  { if $OPT_DRY; then echo "  [dry-run] $*"; else eval "$@"; fi; }
-ask()  { local q="$1" def="${2:-N}" a; if $OPT_YES; then [[ "$def" =~ ^[Yy]$ ]]; return; fi; read -p "$q " a </dev/tty; a=${a:-$def}; [[ "$a" =~ ^[Yy]$ ]]; }
+# ввод пользователя: терминал, если он реально открывается (работает и при curl | bash), иначе stdin (pipe/автотесты)
+if { : </dev/tty; } 2>/dev/null; then IN=/dev/tty; else IN=/dev/stdin; fi
+ask()  { local q="$1" def="${2:-N}" a; if $OPT_YES; then [[ "$def" =~ ^[Yy]$ ]]; return; fi; read -p "$q " a <"$IN"; a=${a:-$def}; [[ "$a" =~ ^[Yy]$ ]]; }
+# choose "Вопрос" "по умолчанию" "буква:описание" … → ответ в CHOSEN
+choose() { local q="$1" def="$2"; shift 2; local opts=("$@") a opt; echo -e "$q"; for opt in "${opts[@]}"; do echo "     [${opt%%:*}] ${opt#*:}"; done
+           if $OPT_YES; then CHOSEN="$def"; echo "     → $def (авто)"; return; fi
+           while true; do read -p "     Выбор [$def]: " a <"$IN"; a=${a:-$def}; a=$(echo "$a" | tr 'A-Z' 'a-z'); for opt in "${opts[@]}"; do [ "${opt%%:*}" = "$a" ] && { CHOSEN="$a"; return; }; done; echo "     Введите одну из букв."; done; }
 
 # ==============================================================================
 # БАЗА
@@ -31,6 +38,7 @@ fn_parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --profile) OPT_PROFILE="$2"; shift ;;
+            update) OPT_PROFILE=5 ;;
             --proxy) OPT_PROXY="$2"; shift ;;
             --no-proxy) OPT_PROXY="none" ;;
             --yes|-y) OPT_YES=true ;;
@@ -148,10 +156,10 @@ fn_setup_proxy() {
     if [ -z "$PROXY_IP" ]; then
         if $OPT_YES; then USE_PROXY_FLAG=false; PREFIX=""; warn "Прокси не задан — прямое соединение."; return 0; fi
         echo -e "${C_CYAN}Нажмите [ENTER], если доступ прямой.${C_NC}"
-        read -p "IP:порт SOCKS5 прокси (например 144.31.139.182:1080): " PROXY_INPUT </dev/tty
+        read -p "IP:порт SOCKS5 прокси (например 144.31.139.182:1080): " PROXY_INPUT <"$IN"
         if [ -z "$PROXY_INPUT" ]; then USE_PROXY_FLAG=false; PREFIX=""; warn "Прокси пропущен. Прямое соединение."; return 0; fi
         PROXY_IP=$(echo "$PROXY_INPUT" | cut -d: -f1); PROXY_PORT=$(echo "$PROXY_INPUT" | cut -d: -s -f2); [ -z "$PROXY_PORT" ] && PROXY_PORT=1080
-        read -sp "Пароль для '$PROXY_USER' (Enter — без пароля): " PROXY_PASS </dev/tty; echo
+        read -sp "Пароль для '$PROXY_USER' (Enter — без пароля): " PROXY_PASS <"$IN"; echo
     fi
     [ -z "$PROXY_PORT" ] && PROXY_PORT=1080
     info "Проверка соединения через ${PROXY_IP}:${PROXY_PORT}…"
@@ -288,93 +296,164 @@ chmod 755 /usr/local/bin/claude"
 }
 
 # ==============================================================================
-# ОБНОВЛЕНИЕ СУЩЕСТВУЮЩИХ УСТАНОВОК + МИГРАЦИЯ СТАРОГО backlog-add
+# МАСТЕР ОБНОВЛЕНИЯ: Claude Code + миграция backlog-add + DevKit (диалоговый)
 # ==============================================================================
-fn_update_all_claude() {
-    warn "--- Поиск установок Claude Code ---"
-    local list; list=$(fn_discover_claude)
-    if [ -z "$list" ]; then warn "Установок не найдено — ставлю заново."; fn_install_claude_smart; return; fi
-    printf '  %-55s %-14s %-10s %s\n' "ПУТЬ" "ТИП" "ВЕРСИЯ" "ВЛАДЕЛЕЦ"
-    while IFS='|' read -r p t v o; do printf '  %-55s %-14s %-10s %s\n' "$p" "$t" "${v:-?}" "$o"; done <<<"$list"
-    echo
-    ask "Обновить все до последней версии? (Y/n):" Y || return 0
+PLAN=()            # строки плана «что сделаем»
+PLAN_CLAUDE=()     # path|type|owner|action  (update|native|skip)
+PLAN_USERS=()      # user|home|devkit(login|update|skip)|legacy(off|keep)
 
-    local latest=""; latest=$(${PREFIX}curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'); [ -n "$latest" ] && info "Последняя версия: $latest"
+fn_type_label() { case "$1" in native) echo "нативная";; npm-sandbox) echo "npm (песочница /opt/vibe-node)";; npm-global) echo "npm -g (системный Node)";; npm-local) echo "старая ~/.claude/local";; wrapper) echo "обёртка";; symlink*) echo "симлинк";; *) echo "$1";; esac; }
+
+fn_wizard_claude() {
+    echo; warn "── Шаг 1. Claude Code ──"
+    local list; list=$(fn_discover_claude)
+    if [ -z "$list" ]; then
+        warn "Установок Claude не найдено."
+        if ask "Установить Claude Code сейчас? (Y/n):" Y; then PLAN+=("Установить Claude Code ($(fn_is_centos7 && echo 'npm-песочница, CentOS 7' || echo 'нативно'))"); PLAN_CLAUDE+=("|install|root|install"); fi
+        return 0
+    fi
+    local latest; latest=$(${PREFIX}curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    printf '  %-3s %-52s %-30s %-9s %s\n' "#" "ПУТЬ" "ТИП" "ВЕРСИЯ" "ВЛАДЕЛЕЦ"
+    local i=0
+    while IFS='|' read -r p t v o; do i=$((i+1)); local mark=""; [ -n "$latest" ] && [ "$v" = "$latest" ] && mark=" ✓"; printf '  %-3s %-52s %-30s %-9s %s\n' "$i" "$p" "$(fn_type_label "$t")" "${v:-?}$mark" "$o"; done <<<"$list"
+    [ -n "$latest" ] && info "  Последняя версия: $latest (✓ — уже актуально)"
+    echo
+    choose "  Что сделать с установками Claude?" "a" "a:обновить все до последней версии (рекомендуется)" "o:решить по каждой" "s:пропустить этот шаг"
+    local mode="$CHOSEN"
+    [ "$mode" = "s" ] && return 0
     while IFS='|' read -r p t v o; do
-        case "$t" in
-            native)
-                info "Обновляю native ($o): $p"
-                if [ "$o" = "root" ]; then run "${PREFIX}'$p' update >>'$LOG' 2>&1" || fn_install_claude_native_for root
-                else run "su - '$o' -c '${PREFIX}\"$p\" update' >>'$LOG' 2>&1" || fn_install_claude_native_for "$o"; fi ;;
-            npm-sandbox)
-                info "Обновляю sandbox npm: $p"
-                run "PATH='$NODE_DIR/bin:$PATH' ${PREFIX}'$NODE_DIR/bin/npm' install -g @anthropic-ai/claude-code@latest >>'$LOG' 2>&1" || warn "npm (sandbox) не обновился — см. $LOG" ;;
-            npm-global)
-                info "Обновляю npm-global: $p"
-                if fn_is_centos7 || ! command -v curl >/dev/null; then run "${PREFIX}npm install -g @anthropic-ai/claude-code@latest >>'$LOG' 2>&1" || warn "npm -g не обновился"
-                else
-                    warn "npm-global устарел как способ установки — ставлю нативный бинарник и переключаю /usr/local/bin/claude на него."
-                    fn_install_claude_native_for root && fn_expose_claude_globally /root/.local/bin/claude
-                fi ;;
-            npm-local)
-                info "Старая установка ~/.claude/local ($o) — заменяю нативной."
-                fn_install_claude_native_for "$o" || warn "Не удалось поставить нативную для $o" ;;
-            *) : ;;
+        [[ "$t" == wrapper || "$t" == symlink* ]] && continue      # обёртки/симлинки обновляются вместе с целью
+        local act="update"
+        if [ "$mode" = "o" ]; then
+            if [[ "$t" == npm-global || "$t" == npm-local ]] && ! fn_is_centos7; then
+                choose "  $p ($(fn_type_label "$t"), ${v:-?}, $o):" "n" "n:заменить нативной установкой Anthropic (рекомендуется)" "u:обновить как есть через npm" "s:не трогать"
+            else
+                choose "  $p ($(fn_type_label "$t"), ${v:-?}, $o):" "u" "u:обновить" "s:не трогать"
+            fi
+            case "$CHOSEN" in n) act="native";; u) act="update";; s) act="skip";; esac
+        elif [[ "$t" == npm-global || "$t" == npm-local ]] && ! fn_is_centos7; then act="native"; fi
+        [ "$act" = "skip" ] && continue
+        PLAN_CLAUDE+=("$p|$t|$o|$act")
+        case "$act" in
+            update) PLAN+=("Обновить $p ($(fn_type_label "$t"), $o) до последней версии");;
+            native) PLAN+=("Заменить $p ($(fn_type_label "$t"), $o) нативной установкой; /usr/local/bin/claude → нативный бинарник");;
         esac
     done <<<"$list"
-    # /usr/local/bin/claude: если это симлинк в /root/.local — другие пользователи его не запустят
     if [ -L /usr/local/bin/claude ] && [[ "$(readlink -f /usr/local/bin/claude)" == /root/* ]]; then
-        fn_expose_claude_globally /root/.local/bin/claude; ok "/usr/local/bin/claude теперь копия, доступная всем пользователям."
+        PLAN+=("/usr/local/bin/claude: симлинк в /root/.local заменить копией (иначе другие пользователи не смогут запустить Claude)")
     fi
-    ok "Обновление Claude завершено. Версии:"; fn_discover_claude | while IFS='|' read -r p t v o; do printf '  %-55s %s\n' "$p" "${v:-?}"; done
 }
 
-fn_migrate_legacy_backlog() {   # старый скилл backlog-add / sheets_sync / Stop-хук → выключить, DevKit вместо них
-    local h="$1" u="$2" moved=0
-    if [ -d "$h/.claude/skills/backlog-add" ]; then
-        if $OPT_KEEP_LEGACY; then warn "  $u: backlog-add оставлен (--keep-legacy)"; return 0; fi
-        run "mv '$h/.claude/skills/backlog-add' '$h/.claude/skills/backlog-add.disabled.$(date +%Y%m%d)'"; moved=1
-    fi
-    if [ -f "$h/.claude/settings.json" ] && grep -q 'check_backlog_called' "$h/.claude/settings.json"; then
+fn_user_devkit_state() {   # $1 home → "key|legacy|projects"
+    local h="$1" key=no legacy=no projects=0
+    [ -s "$h/.config/mw-devkit/key" ] && key=yes
+    { [ -d "$h/.claude/skills/backlog-add" ] || grep -qs 'check_backlog_called' "$h/.claude/settings.json"; } && legacy=yes
+    projects=$(find "$h" /home /opt /var/www -maxdepth 3 -name .mw-devkit -user "$(stat -c %U "$h")" 2>/dev/null | wc -l)
+    echo "$key|$legacy|$projects"
+}
+
+fn_wizard_devkit() {
+    echo; warn "── Шаг 2. MW DevKit (журнал работ проекта в AdFlow) ──"
+    echo "  Вход по рабочему e-mail (код придёт в Битрикс24), права — по роли в команде проекта. Скилл и хуки — из AdFlow."
+    local users=("root|/root"); for h in /home/*; do [ -d "$h/.claude" ] && users+=("$(stat -c %U "$h")|$h"); done
+    printf '  %-14s %-10s %-22s %s\n' "ПОЛЬЗОВАТЕЛЬ" "КЛЮЧ" "СТАРЫЙ backlog-add" "ПРОЕКТОВ ПРИВЯЗАНО"
+    for ent in "${users[@]}"; do IFS='|' read -r u h <<<"$ent"; IFS='|' read -r k l pr <<<"$(fn_user_devkit_state "$h")"
+        printf '  %-14s %-10s %-22s %s\n' "$u" "$([ $k = yes ] && echo есть || echo нет)" "$([ $l = yes ] && echo 'есть (Sheets)' || echo нет)" "$pr"; done
+    echo
+    for ent in "${users[@]}"; do
+        IFS='|' read -r u h <<<"$ent"; IFS='|' read -r k l pr <<<"$(fn_user_devkit_state "$h")"
+        local dk="skip" lg="keep"
+        if [ "$k" = yes ]; then
+            choose "  $u: ключ уже есть." "u" "u:обновить скилл и хуки из AdFlow (рекомендуется)" "s:ничего не делать"; [ "$CHOSEN" = u ] && dk="update"
+        else
+            choose "  $u: DevKit не подключён." "$([ "$u" = root ] && echo l || echo s)" "l:подключить сейчас — спрошу e-mail, код придёт в Битрикс24" "s:пропустить (позже: adflow login)"; [ "$CHOSEN" = l ] && dk="login"
+        fi
+        if [ "$l" = yes ]; then
+            if $OPT_KEEP_LEGACY; then lg="keep"
+            else choose "  $u: найден старый backlog-add (Google-таблица)." "$([ "$dk" = skip ] && echo k || echo o)" "o:отключить — журнал ведёт DevKit (скилл в бэкап, Stop-хук снимается, sheets_sync и cron не трогаю)" "k:оставить пока"; [ "$CHOSEN" = o ] && lg="off"; fi
+        fi
+        PLAN_USERS+=("$u|$h|$dk|$lg")
+        case "$dk" in login) PLAN+=("$u: adflow login (e-mail → код в Б24) + adflow update");; update) PLAN+=("$u: adflow update (скилл и хуки из AdFlow)");; esac
+        [ "$lg" = off ] && PLAN+=("$u: отключить старый backlog-add (бэкап скилла, снять Stop-хук)")
+    done
+    PLAN+=("Установить/обновить утилиту adflow из AdFlow ($ADFLOW_URL)")
+}
+
+fn_apply_claude() {
+    local latest; latest=$(${PREFIX}curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    for ent in "${PLAN_CLAUDE[@]}"; do
+        IFS='|' read -r p t o act <<<"$ent"
+        case "$act" in
+            install) fn_install_claude_smart ;;
+            native) info "→ $p: нативная установка для $o"; fn_install_claude_native_for "$o" && { [ "$o" = root ] && fn_expose_claude_globally /root/.local/bin/claude; } || warn "  не удалось поставить нативную для $o" ;;
+            update)
+                case "$t" in
+                    native) info "→ $p: claude update ($o)"
+                        if [ "$o" = root ]; then run "${PREFIX}'$p' update >>'$LOG' 2>&1" || fn_install_claude_native_for root
+                        else run "su - '$o' -c '${PREFIX}\"$p\" update' >>'$LOG' 2>&1" || fn_install_claude_native_for "$o"; fi ;;
+                    npm-sandbox) info "→ песочница: npm install -g @anthropic-ai/claude-code@latest"
+                        run "PATH='$NODE_DIR/bin:$PATH' ${PREFIX}'$NODE_DIR/bin/npm' install -g @anthropic-ai/claude-code@latest >>'$LOG' 2>&1" || warn "  npm (sandbox) не обновился — см. $LOG" ;;
+                    npm-global) info "→ npm -g: install -g @anthropic-ai/claude-code@latest"
+                        run "${PREFIX}npm install -g @anthropic-ai/claude-code@latest >>'$LOG' 2>&1" || warn "  npm -g не обновился — см. $LOG" ;;
+                    npm-local) info "→ $p: старая ~/.claude/local — заменяю нативной"; fn_install_claude_native_for "$o" || warn "  не удалось" ;;
+                esac ;;
+        esac
+    done
+    if [ -L /usr/local/bin/claude ] && [[ "$(readlink -f /usr/local/bin/claude)" == /root/* ]]; then fn_expose_claude_globally /root/.local/bin/claude; fi
+    echo; ok "Claude Code после обновления:"; fn_discover_claude | while IFS='|' read -r p t v o; do printf '  %-52s %-9s %s\n' "$p" "${v:-?}" "$([ -n "$latest" ] && [ "$v" = "$latest" ] && echo '✓ актуально' || echo '')"; done
+}
+
+fn_migrate_legacy_backlog() {   # $1 home $2 user
+    local h="$1" u="$2"
+    [ -d "$h/.claude/skills/backlog-add" ] && run "mv '$h/.claude/skills/backlog-add' '$h/.claude/skills/backlog-add.disabled.$(date +%Y%m%d)'"
+    if grep -qs 'check_backlog_called' "$h/.claude/settings.json"; then
         run "python3 - '$h/.claude/settings.json' <<'PY'
 import json,sys; p=sys.argv[1]; d=json.load(open(p)); h=d.get('hooks',{})
 for ev in list(h): h[ev]=[x for x in h[ev] if not any('check_backlog_called' in (c.get('command') or '') for c in x.get('hooks',[]))]; h[ev] or h.pop(ev)
 json.dump(d,open(p,'w'),ensure_ascii=False,indent=2)
-PY"; moved=1
+PY"
     fi
-    [ -d "$h/.claude/sheets_sync" ] && warn "  $u: sheets_sync оставлен на месте (cron sync.php выключите после переезда: crontab -e)"
-    [ $moved = 1 ] && ok "  $u: старый backlog-add отключён — журнал работ ведёт DevKit"
-    return 0
+    [ -d "$h/.claude/sheets_sync" ] && warn "  $u: sheets_sync и его cron оставлены — выключите после первого закрытого таска в AdFlow (crontab -e)"
+    ok "  $u: старый backlog-add отключён — журнал работ ведёт DevKit"
 }
 
-fn_setup_devkit_for_user() {   # $1 = пользователь
-    local u="$1" home; home=$(getent passwd "$u" | cut -d: -f6)
-    [ -d "$home/.claude" ] || return 0
-    echo
-    info "--- MW DevKit для пользователя $u ($home) ---"
-    if [ -s "$home/.config/mw-devkit/key" ]; then
-        info "  ключ уже есть — обновляю скилл и хуки"
-        run "su - '$u' -c '${PREFIX}adflow update'" || warn "  adflow update не удался"
-        fn_migrate_legacy_backlog "$home" "$u"; return 0
-    fi
-    if ask "  Подключить $u к DevKit сейчас? Нужен его рабочий e-mail и код из Битрикс24 (y/N):" N; then
-        if [ "$u" = "root" ]; then run "${PREFIX}adflow login </dev/tty && ${PREFIX}adflow update"
-        else run "su - '$u' -c '${PREFIX}adflow login </dev/tty && ${PREFIX}adflow update'"; fi \
-          && fn_migrate_legacy_backlog "$home" "$u" || warn "  DevKit для $u не подключён — позже: adflow login && adflow update"
-        warn "  Привязку проекта делают в каталоге репозитория: cd <проект> && adflow link"
-    else
-        warn "  Пропущено. Позже под $u: adflow login && adflow link && adflow update"
-    fi
-}
-
-fn_setup_devkit() {
-    echo; warn "--- Подключение к MEDIA WORKS DevKit ---"
-    echo "Claude Code ведёт журнал работ проекта в AdFlow: вход по рабочему e-mail (код придёт в Битрикс24), выбор проекта, инструкции и хуки — из AdFlow."
+fn_apply_devkit() {
     command -v python3 >/dev/null 2>&1 || fn_prepare_minimal
     run "${PREFIX}curl -fsSL '$ADFLOW_URL/devkit/cli' -o /usr/local/bin/adflow && chmod 755 /usr/local/bin/adflow" || { err "Не удалось скачать adflow из AdFlow"; return 1; }
-    ok "adflow установлен ($(/usr/local/bin/adflow --help 2>&1 | head -n 1 | cut -c1-60)…)"
-    local users=(root); for h in /home/*; do [ -d "$h/.claude" ] && users+=("$(stat -c %U "$h")"); done
-    for u in "${users[@]}"; do fn_setup_devkit_for_user "$u"; done
+    ok "adflow: $(/usr/local/bin/adflow --help 2>&1 | head -n 1 | cut -c1-70)"
+    for ent in "${PLAN_USERS[@]}"; do
+        IFS='|' read -r u h dk lg <<<"$ent"
+        case "$dk" in
+            login) info "→ $u: вход в DevKit"
+                if [ "$u" = root ]; then run "${PREFIX}adflow login <$IN && ${PREFIX}adflow update" || warn "  $u: не подключён — позже: adflow login && adflow update"
+                else run "su - '$u' -c '${PREFIX}adflow login <$IN && ${PREFIX}adflow update'" || warn "  $u: не подключён — позже под $u: adflow login && adflow update"; fi
+                warn "  $u: проект привязывается в каталоге репозитория: cd <проект> && adflow link" ;;
+            update) info "→ $u: adflow update"; if [ "$u" = root ]; then run "${PREFIX}adflow update" || warn "  не удалось"; else run "su - '$u' -c '${PREFIX}adflow update'" || warn "  не удалось"; fi ;;
+        esac
+        [ "$lg" = off ] && fn_migrate_legacy_backlog "$h" "$u"
+    done
+}
+
+fn_update_wizard() {
+    PLAN=(); PLAN_CLAUDE=(); PLAN_USERS=()
+    fn_wizard_claude
+    fn_wizard_devkit
+    echo; warn "── План ──"
+    if [ ${#PLAN[@]} -eq 0 ]; then ok "Делать нечего."; return 0; fi
+    local n=0; for x in "${PLAN[@]}"; do n=$((n+1)); echo "  $n. $x"; done
+    $OPT_DRY && warn "  (--dry-run: команды будут только напечатаны)"
+    echo; ask "Выполнить? (Y/n):" Y || { warn "Отменено."; return 0; }
+    fn_apply_claude
+    fn_apply_devkit
+}
+
+# совместимость: старые имена
+fn_update_all_claude() { fn_update_wizard; }
+fn_setup_devkit() {
+    echo; warn "--- Подключение к MEDIA WORKS DevKit ---"
+    PLAN=(); PLAN_CLAUDE=(); PLAN_USERS=(); fn_wizard_devkit
+    echo; local n=0; for x in "${PLAN[@]}"; do n=$((n+1)); echo "  $n. $x"; done
+    ask "Выполнить? (Y/n):" Y && fn_apply_devkit
 }
 
 # ==============================================================================
@@ -386,9 +465,9 @@ fn_deploy_presale_stack() {
     if [ -d "$DEMO_DIR/frontend" ] && ! ask "Стек уже развёрнут в $DEMO_DIR. Пересоздать (данные Postgres сохранятся)? (y/N):" N; then return 0; fi
     fn_install_nodejs_sandboxed
     local APP_DOMAIN="$OPT_DOMAIN" DB_PASS="$OPT_DBPASS"
-    if [ -z "$APP_DOMAIN" ]; then $OPT_YES && APP_DOMAIN=localhost || { read -p "Домен для Caddy (по умолчанию localhost): " APP_DOMAIN </dev/tty; APP_DOMAIN=${APP_DOMAIN:-localhost}; }; fi
+    if [ -z "$APP_DOMAIN" ]; then $OPT_YES && APP_DOMAIN=localhost || { read -p "Домен для Caddy (по умолчанию localhost): " APP_DOMAIN <"$IN"; APP_DOMAIN=${APP_DOMAIN:-localhost}; }; fi
     if [ -z "$DB_PASS" ]; then
-        if $OPT_YES; then DB_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20); else read -sp "Пароль PostgreSQL (Enter — сгенерировать): " DB_PASS </dev/tty; echo; DB_PASS=${DB_PASS:-$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)}; fi
+        if $OPT_YES; then DB_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20); else read -sp "Пароль PostgreSQL (Enter — сгенерировать): " DB_PASS <"$IN"; echo; DB_PASS=${DB_PASS:-$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)}; fi
     fi
     mkdir -p "$DEMO_DIR"/{docker,backend}
 
@@ -547,13 +626,13 @@ fn_interactive_menu() {
     echo -e "  [0] Выход"
     echo
     local CHOICE="$OPT_PROFILE"
-    [ -z "$CHOICE" ] && { read -p " Выберите профиль (0-5): " CHOICE </dev/tty; echo; }
+    [ -z "$CHOICE" ] && { read -p " Выберите профиль (0-5): " CHOICE <"$IN"; echo; }
     case "$CHOICE" in
         1) fn_setup_proxy; fn_prepare_minimal; fn_install_claude_smart; fn_setup_devkit ;;
         2) fn_setup_proxy; fn_prepare_full; fn_install_docker; fn_install_claude_smart; fn_deploy_presale_stack; fn_setup_devkit ;;
         3) fn_setup_proxy; fn_prepare_full; fn_install_docker; fn_install_claude_smart; fn_setup_devkit ;;
         4) fn_setup_proxy; exit 0 ;;
-        5) fn_setup_proxy; fn_prepare_minimal; fn_update_all_claude; fn_setup_devkit ;;
+        5) fn_setup_proxy; fn_prepare_minimal; fn_update_wizard ;;
         0) echo "Отмена."; exit 0 ;;
         *) err "Недопустимый код профиля."; exit 1 ;;
     esac
