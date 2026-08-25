@@ -4,7 +4,7 @@
 #   bash install-proxy.sh                      — интерактивное меню
 #   bash install-proxy.sh update               — мастер обновления: все установки Claude + DevKit (с вопросами)
 #   bash install-proxy.sh update --yes         — то же без вопросов (рекомендуемые ответы)
-#   Флаги: --profile N | --proxy IP:PORT[:пароль] | --no-proxy | --method native|npm|auto | --ascii | --yes | --dry-run | --keep-legacy | --domain D | --db-pass P
+#   Флаги: --profile N | --proxy IP:PORT[:пароль] | --proxy adflow (из AdFlow по ключу DevKit) | --no-proxy | --method native|npm|auto | --ascii | --yes | --dry-run | --keep-legacy | --domain D | --db-pass P
 # ==============================================================================
 set -o pipefail
 
@@ -25,8 +25,8 @@ if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null |
 else
     C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_CYAN=''; C_DIM=''; C_BOLD=''; C_NC=''
 fi
-# символы: UTF-8 при UTF-8-локали и «умном» терминале; иначе (vt100/linux/dumb, PuTTY в cp1251, --ascii или MW_ASCII=1) — чистый ASCII
-if [ -z "${MW_ASCII:-}" ] && [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]] && [[ ! "${TERM:-}" =~ ^(vt100|vt102|vt220|linux|dumb)$ ]]; then
+# символы: по умолчанию UTF-8 (самый красивый режим); чистый ASCII — только по --ascii или MW_ASCII=1 (PuTTY без UTF-8)
+if [ -z "${MW_ASCII:-}" ]; then
     S_OK='✓'; S_FAIL='✗'; S_ARR='→'; S_DOT='•'; S_LINE='─'; S_SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 else
     S_OK='OK'; S_FAIL='X'; S_ARR='->'; S_DOT='*'; S_LINE='-'; S_SPIN='|/-\'
@@ -90,8 +90,28 @@ fn_parse_args() {
 fn_show_logo() {
     $OPT_YES || clear
     echo
-    printf '  %s%sMEDIA WORKS%s  %sустановщик: Claude Code %s MW DevKit %s Docker %s Presale%s\n' "$C_BOLD" "$C_CYAN" "$C_NC" "$C_DIM" "$S_DOT" "$S_DOT" "$S_DOT" "$C_NC"
-    hr
+    printf '%s%s' "$C_BOLD" "$C_CYAN"
+    if [ "$S_OK" = '✓' ]; then
+        echo '  ███╗   ███╗███████╗██████╗ ██╗ █████╗     ██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗███████╗'
+        echo '  ████╗ ████║██╔════╝██╔══██╗██║██╔══██╗    ██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝██╔════╝'
+        echo '  ██╔████╔██║█████╗  ██║  ██║██║███████║    ██║ █╗ ██║██║   ██║██████╔╝█████╔╝ ███████╗'
+        echo '  ██║╚██╔╝██║██╔══╝  ██║  ██║██║██╔══██║    ██║███╗██║██║   ██║██╔══██╗██╔═██╗ ╚════██║'
+        echo '  ██║ ╚═╝ ██║███████╗██████╔╝██║██║  ██║    ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗███████║'
+        echo '  ╚═╝     ╚═╝╚══════╝╚═════╝ ╚═╝╚═╝  ╚═╝     ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝'
+    else
+        echo '  ###    ### ####### ######  ##  #####      ##     ##  ######  ######  ##   ## #######'
+        echo '  ####  #### ##      ##   ## ## ##   ##     ##     ## ##    ## ##   ## ##  ##  ##'
+        echo '  ## #### ## #####   ##   ## ## #######     ##  #  ## ##    ## ######  #####   #######'
+        echo '  ##  ##  ## ##      ##   ## ## ##   ##     ## ### ## ##    ## ##   ## ##  ##       ##'
+        echo '  ##      ## ####### ######  ## ##   ##      ### ###   ######  ##   ## ##   ## #######'
+        echo ''
+    fi
+    printf '%s' "$C_NC"
+    local l="" i; for ((i=0; i<87; i++)); do l+="$S_LINE"; done
+    printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
+    printf '  %sУстановщик MEDIA WORKS%s   %sClaude Code %s MW DevKit %s Docker %s Presale Demo Stack%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$S_DOT" "$S_DOT" "$S_DOT" "$C_NC"
+    printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
+    echo
 }
 
 fn_check_root() { [ "$EUID" -ne 0 ] && { err "Запуск только от root (или sudo)."; exit 1; }; return 0; }
@@ -185,14 +205,45 @@ fn_proxy_test() {   # 0 — интернет есть; NATIVE_OK=false, если
     curl -x "$px" -fsS -o /dev/null --connect-timeout 10 --max-time 25 https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>>"$LOG"
 }
 
+fn_adflow_direct() { curl -fsS -o /dev/null --connect-timeout 8 --max-time 20 "$ADFLOW_URL/devkit/install.sh" 2>>"$LOG"; }
+
+fn_ensure_adflow_cli() {   # adflow ставится напрямую с AdFlow (прокси не нужен)
+    [ -x /usr/local/bin/adflow ] && return 0
+    command -v python3 >/dev/null 2>&1 || fn_prepare_minimal
+    spin "Утилита adflow из AdFlow" "curl -fsSL --max-time 60 '$ADFLOW_URL/devkit/cli' -o /usr/local/bin/adflow && chmod 755 /usr/local/bin/adflow"
+}
+
+fn_proxy_from_adflow() {   # параметры SOCKS5 из AdFlow по личному ключу → PROXY_*; 0 — получены
+    fn_ensure_adflow_cli || return 1
+    if [ -z "${ADFLOW_DEV_KEY:-}" ] && [ ! -s /root/.config/mw-devkit/key ]; then
+        info "${C_DIM}настройки сети хранятся в AdFlow и выдаются после входа в DevKit${C_NC}"
+        if ask "Войти в DevKit сейчас (рабочий e-mail, код придёт в Битрикс24)? (Y/n):" Y; then adflow login <"$IN" >/dev/null || return 1; else return 1; fi
+    fi
+    local js; js=$(adflow proxy 2>>"$LOG") || return 1
+    echo "$js" | grep -q '"configured": true' || { warn "в AdFlow прокси не настроен (devkit.proxy)"; return 1; }
+    PROXY_IP=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin)["host"])'); PROXY_PORT=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin)["port"])')
+    PROXY_USER=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("user") or "proxyuser")'); PROXY_PASS=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("pass") or "")')
+    ok "Параметры прокси получены из AdFlow: ${PROXY_IP}:${PROXY_PORT}"
+}
+
 fn_setup_proxy() {
     step "Сеть"
     command -v curl >/dev/null 2>&1 || fn_prepare_minimal
     if [ "$OPT_PROXY" = "none" ]; then USE_PROXY_FLAG=false; PREFIX=""; ok "Прямое соединение (--no-proxy)."; fn_direct_test; return 0; fi
-    if [ -n "$OPT_PROXY" ]; then
+    if [ "$OPT_PROXY" = "adflow" ]; then fn_proxy_from_adflow || { err "Не удалось получить прокси из AdFlow"; exit 1; }
+    elif [ -n "$OPT_PROXY" ]; then
         PROXY_IP=$(echo "$OPT_PROXY" | cut -d: -f1); PROXY_PORT=$(echo "$OPT_PROXY" | cut -d: -f2); PROXY_PASS=$(echo "$OPT_PROXY" | cut -d: -s -f3-)
     elif fn_proxy_read_existing; then
         if ! ask "Прокси уже настроен: ${PROXY_IP}:${PROXY_PORT} — использовать? (Y/n):" Y; then PROXY_IP=""; fi
+    fi
+    if [ -z "$PROXY_IP" ] && [ "$OPT_PROXY" != "none" ]; then
+        local direct; direct=$(curl -sSL -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 https://claude.ai/install.sh 2>>"$LOG")
+        if [ "$direct" = "200" ]; then ok "claude.ai доступен напрямую — прокси не нужен"; NATIVE_OK=true; USE_PROXY_FLAG=false; PREFIX=""; return 0; fi
+        info "claude.ai напрямую: HTTP ${direct:-нет связи}"
+        if fn_adflow_direct; then
+            choose "Откуда взять настройки прокси?" "a" "a:из AdFlow (после входа в DevKit)" "m:ввести вручную" "n:без прокси"
+            case "$CHOSEN" in a) fn_proxy_from_adflow || warn "не получилось — введите вручную";; n) USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0;; esac
+        fi
     fi
     if [ -z "$PROXY_IP" ]; then
         if $OPT_YES; then USE_PROXY_FLAG=false; PREFIX=""; warn "Прокси не задан — прямое соединение."; fn_direct_test; return 0; fi
