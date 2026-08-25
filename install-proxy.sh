@@ -35,7 +35,7 @@ COLS=$(tput cols 2>/dev/null || echo 87); [ "$COLS" -gt 87 ] && COLS=87
 hr()   { local l="" i; for ((i=0; i<COLS; i++)); do l+="$S_LINE"; done; printf '%s%s%s\n' "$C_DIM" "$l" "$C_NC"; }
 STEP_N=0; STEP_TOTAL=0
 step() { STEP_N=$((STEP_N+1)); echo; printf '  %s%s %s%s %s%s/%s%s\n' "$C_CYAN" "$S_DOT" "$C_BOLD" "$1" "$C_DIM" "$STEP_N" "${STEP_TOTAL:-?}" "$C_NC"; echo "$(date '+%F %T') === [$STEP_N] $1" >> "$LOG" 2>/dev/null; }
-log()  { echo -e "$1"; echo -e "$(date '+%F %T') $1" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG" 2>/dev/null; }
+log()  { echo -e "$1"; echo -e "$(date '+%F %T') $1" | sed -E 's/\x1b\[[0-9;]*m//g; s/\x1b\(B//g' >> "$LOG" 2>/dev/null; }
 info() { log "   $1"; }
 ok()   { log "   ${C_GREEN}${S_OK}${C_NC} $1"; }
 warn() { log "   ${C_YELLOW}!${C_NC} $1"; }
@@ -460,7 +460,7 @@ fn_wizard_claude() {
         PLAN_CLAUDE+=("$p|$t|$o|$act")
         case "$act" in
             update) PLAN+=("Обновить Claude Code ($(fn_type_label "$t"), $o)");;
-            native) PLAN+=("Поставить официальный Claude Code вместо установки через npm ($o)");;
+            native) PLAN+=("Перейти на официальный Claude Code, старую npm-установку убрать ($o)");;
             npm) PLAN+=("Переустановить Claude Code через npm ($o)");;
         esac
     done <<<"$list"
@@ -508,7 +508,9 @@ fn_apply_claude() {
         IFS='|' read -r p t o act <<<"$ent"
         case "$act" in
             install) fn_install_claude_smart ;;
-            native) if fn_install_claude_native_for "$o"; then [ "$o" = root ] && fn_expose_claude_globally /root/.local/bin/claude
+            native) if [ "$o" = root ] && [ -x /root/.local/bin/claude ] || fn_install_claude_native_for "$o"; then
+                        [ "$o" = root ] && fn_expose_claude_globally /root/.local/bin/claude
+                        if [ "$t" = npm-global ] && command -v npm >/dev/null 2>&1; then spin "Убираю старую npm-установку" "${PREFIX}npm -g uninstall @anthropic-ai/claude-code" || true; fi
                     else warn "нативная не удалась — второй способ: npm"; fn_install_claude_npm || err "Claude для $o не обновлён (см. $LOG)"; fi ;;
             npm) fn_install_claude_npm || err "npm-установка не удалась (см. $LOG)" ;;
             update)
@@ -564,14 +566,20 @@ fn_devkit_update() {   # $1 = пользователь
     ok "Инструкции и хуки Claude обновлены ${C_DIM}(версия $(echo "$out" | fn_json version))${C_NC}"
 }
 
-fn_devkit_link_prompt() {   # предложить привязать проект прямо сейчас
-    local u="$1" dir out
-    echo; read -p "   Каталог проекта для привязки ${C_DIM}(Enter — позже, командой adflow link)${C_NC}: " dir <"$IN"
-    [ -z "$dir" ] && return 0
-    [ -d "$dir" ] || { warn "каталога $dir нет — привяжете позже: cd <проект> && adflow link"; return 0; }
-    printf '   Ваши проекты в AdFlow:\n'; fn_as_user "$u" adflow projects 2>/dev/null | head -20 || true
-    read -p "   Код проекта: " code <"$IN"; [ -z "$code" ] && return 0
-    out=$(cd "$dir" && fn_as_user "$u" adflow link "$code" 2>/dev/null) && ok "Проект ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC} привязан к $dir" || warn "не привязан: $(echo "$out" | fn_json error)"
+fn_devkit_link_prompt() {   # привязать проект прямо сейчас (можно пропустить)
+    local u="$1" dir out state
+    echo; printf '   %sПроект%s — код даёт ПМ проекта; подтверждает подключение тоже ПМ (свой проект — сразу).\n' "$C_BOLD" "$C_NC"
+    read -p "   Каталог проекта ${C_DIM}(Enter — пропустить, позже: cd <проект> && adflow link)${C_NC}: " dir <"$IN"
+    [ -z "$dir" ] && { info "${C_DIM}пока — гостевой режим: записи копятся на вас, ПМ привяжет их к проекту${C_NC}"; return 0; }
+    [ -d "$dir" ] || { warn "каталога $dir нет — привяжете позже"; return 0; }
+    read -p "   Код проекта ${C_DIM}(Enter — гостевой режим)${C_NC}: " code <"$IN"
+    if [ -z "$code" ]; then (cd "$dir" && fn_as_user "$u" adflow link --guest >/dev/null 2>&1); ok "Гостевой режим в $dir — ПМ привяжет записи к проекту"; return 0; fi
+    out=$(cd "$dir" && fn_as_user "$u" adflow link "$code" 2>/dev/null); state=$(echo "$out" | fn_json state)
+    case "$state" in
+        approved) ok "Проект ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC} подключён к $dir" ;;
+        pending)  ok "Запрос отправлен ПМу проекта ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC}; до подтверждения — гостевой режим" ;;
+        *)        warn "не подключён: $(echo "$out" | fn_json error)" ;;
+    esac
 }
 
 fn_apply_devkit() {
@@ -765,7 +773,7 @@ fn_finish_message() {
     local pc=""; $USE_PROXY_FLAG && pc="proxychains4 -q "
     printf '   %sЧто дальше%s\n' "$C_BOLD" "$C_NC"
     printf '   %s1%s  Запустите %s%sclaude%s, внутри — команда %s/login%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$pc" "$C_NC" "$C_BOLD" "$C_NC"
-    printf '   %s2%s  В каталоге проекта: %sadflow link%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC"
+    printf '   %s2%s  В каталоге проекта: %sadflow link <код проекта>%s %s(код даёт ПМ; или adflow link --guest)%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
     printf '   %s3%s  Работайте как обычно, в конце скажите Claude %s«закрой таск»%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC"
     echo; printf '   %sЕсли в этой же сессии «claude» не находится — выполните hash -r или откройте новый терминал. Лог: %s%s\n' "$C_DIM" "$LOG" "$C_NC"
     hr
