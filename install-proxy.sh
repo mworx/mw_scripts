@@ -556,6 +556,10 @@ fn_devkit_login() {   # $1 = пользователь; красивый диал
     read -p "   Рабочий e-mail: " email <"$IN"; [ -z "$email" ] && { warn "e-mail не введён — пропускаю"; return 1; }
     out=$(fn_as_user "$u" adflow login --email "$email" 2>/dev/null <"$IN") || { err "Вход не выполнен: $(echo "$out" | fn_json error)"; return 1; }
     ok "Вы вошли как ${C_BOLD}$(echo "$out" | fn_json employee)${C_NC}"
+    local list; list=$(echo "$out" | python3 -c "
+import sys,json
+for p in json.load(sys.stdin).get('projects', []): print(f\"     {p['code']:<24} {p['name']}  [{p['role']}]\")" 2>/dev/null)
+    if [ -n "$list" ]; then printf '   %sВаши проекты%s %s(показываются один раз — запомните код нужного)%s\n%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC" "$list"; fi
     return 0
 }
 
@@ -568,7 +572,7 @@ fn_devkit_update() {   # $1 = пользователь
 
 fn_devkit_link_prompt() {   # привязать проект прямо сейчас (можно пропустить)
     local u="$1" dir out state
-    echo; printf '   %sПроект%s — код проекта даёт ПМ; подключение подтверждается кодом, который придёт ПМу в Битрикс24.\n' "$C_BOLD" "$C_NC"
+    echo; printf '   %sПроект%s — подключение подтверждается кодом, который придёт ПМу проекта (Битрикс24 и почта).\n' "$C_BOLD" "$C_NC"
     read -p "   Каталог проекта ${C_DIM}(Enter — пропустить, позже: cd <проект> && adflow link)${C_NC}: " dir <"$IN"
     [ -z "$dir" ] && { info "${C_DIM}пока — гостевой режим: записи копятся на вас, ПМ привяжет их к проекту${C_NC}"; return 0; }
     [ -d "$dir" ] || { warn "каталога $dir нет — привяжете позже"; return 0; }
