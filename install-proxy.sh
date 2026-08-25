@@ -141,7 +141,9 @@ fn_pkg_install() {   # тихо, но с проверкой результата
 fn_missing_pkgs() {   # пакет:команда … → список пакетов, чьей команды нет
     local out=() x; for x in "$@"; do local pkg="${x%%:*}" cmd="${x#*:}"; [ "$cmd" = "-" ] && { out+=("$pkg"); continue; }; command -v "$cmd" >/dev/null 2>&1 || out+=("$pkg"); done; echo "${out[@]}"
 }
+PREPARED_MIN=false
 fn_prepare_minimal() {
+    $PREPARED_MIN && return 0; PREPARED_MIN=true
     step "Базовые утилиты"
     if [ "$PKG_MANAGER" = "apt" ]; then
         apt-get update >>"$LOG" 2>&1 || warn "apt-get update завершился с ошибкой (см. $LOG) — продолжаю"
