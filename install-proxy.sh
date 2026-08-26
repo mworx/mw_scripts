@@ -325,12 +325,13 @@ fn_setup_proxy() {
         [ "$PKG_MANAGER" = "apt" ] && apt-get update >>"$LOG" 2>&1
         fn_pkg_install proxychains-ng || { err "Не удалось установить proxychains-ng (на CentOS нужен EPEL; см. $LOG)"; exit 1; }
     fi
+    # ВАЖНО: без proxy_dns. С ним proxychains подменяет DNS фальшивыми адресами 224.x — на них падает npm (ECONNREFUSED 224.0.0.1)
+    # и молча виснет Claude Code («No response from API», инцидент 2026-08-26). DNS резолвится локально, через прокси идёт только TCP.
     fn_proxy_conf_path
     [ -f "$PROXYCHAINS_CONF_FILE" ] && cp -f "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     run "cat > '$PROXYCHAINS_CONF_FILE' <<EOF
 strict_chain
 quiet_mode
-proxy_dns
 remote_dns_subnet 224
 tcp_read_time_out 15000
 tcp_connect_time_out 8000
