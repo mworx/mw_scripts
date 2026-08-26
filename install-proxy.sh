@@ -10,7 +10,11 @@
 set -o pipefail
 
 ADFLOW_URL="${ADFLOW_URL:-https://adflow.mworx.ru/api/v1}"
-NODE_DIR="/opt/vibe-node"; NODE_VER="v22.23.2"; NODE_MAJOR=22; DEMO_DIR="/opt/vibe-demo"   # Claude Code ≥ 2.1.246 требует Node ≥ 22; для CentOS 7 есть сборка glibc-217
+NODE_DIR="/opt/vibe-node"; NODE_VER="v22.23.2"; NODE_MAJOR=22; DEMO_DIR="/opt/vibe-demo"
+# Claude Code с 2.1.113 в npm — нативный Bun-бинарник: LD_PRELOAD (proxychains) для него не работает («No response from API»).
+# 2.1.112 — последняя JS-версия (cli.js на Node), она через proxychains работает. Через прокси ставим её и глушим автообновление.
+CLAUDE_JS_VERSION="2.1.112"
+fn_claude_npm_spec() { if $USE_PROXY_FLAG; then echo "@anthropic-ai/claude-code@$CLAUDE_JS_VERSION"; else echo "@anthropic-ai/claude-code@latest"; fi; }   # Claude Code ≥ 2.1.246 требует Node ≥ 22; для CentOS 7 есть сборка glibc-217
 PKG_MANAGER=""; OS_ID=""; OS_VERSION=""
 PROXY_IP=""; PROXY_PORT=""; PROXY_USER="proxyuser"; PROXY_PASS=""; PROXYCHAINS_CONF_FILE=""
 USE_PROXY_FLAG=false; PREFIX=""
@@ -437,7 +441,8 @@ fn_install_claude_npm() {   # второй способ: npm из registry.npmjs
     local npm_bin="npm" node_hint="системный Node $(node -v 2>/dev/null)"
     if ! fn_system_node_ok; then fn_install_nodejs_sandboxed || return 1; npm_bin="$NODE_DIR/bin/npm"; node_hint="песочница $NODE_DIR"; fi
     [ "$npm_bin" = npm ] && npm_bin=$(command -v npm)
-    SPIN_TIMEOUT=900 spin "Claude Code через npm ($node_hint)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$npm_bin" install -g @anthropic-ai/claude-code@latest)" || return 1
+    $USE_PROXY_FLAG && info "${C_DIM}через proxychains работает только JS-версия Claude Code — ставлю $CLAUDE_JS_VERSION${C_NC}"
+    SPIN_TIMEOUT=900 spin "Claude Code через npm ($node_hint)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$npm_bin" install -g "$(fn_claude_npm_spec)")" || return 1
     local bin; bin=$(PATH="$NODE_DIR/bin:$PATH" command -v claude 2>/dev/null || ls "$NODE_DIR/bin/claude" 2>/dev/null | head -n 1)
     [ -n "$bin" ] || { err "после npm install бинарник claude не найден"; return 1; }
     if [[ "$bin" == "$NODE_DIR/"* ]]; then
@@ -500,6 +505,7 @@ fn_wizard_claude() {
         return 0
     fi
     local latest; latest=$($(fn_net_prefix "https://registry.npmjs.org/-/ping")curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null </dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    if $USE_PROXY_FLAG; then latest="$CLAUDE_JS_VERSION"; info "${C_DIM}сервер за proxychains: новее $CLAUDE_JS_VERSION ставить нельзя (с 2.1.113 Claude Code — бинарник, прокси не видит)${C_NC}"; fi
     local i=0
     while IFS='|' read -r p t v o; do [[ "$t" == wrapper || "$t" == symlink* ]] && continue; i=$((i+1))
         local mark=""
@@ -597,8 +603,8 @@ fn_apply_claude() {
                         if [ "$o" = root ]; then SPIN_TIMEOUT=600 spin "claude update ($o)" "${PREFIX}'$p' update" || fn_install_claude_native_for root || fn_install_claude_npm
                         else SPIN_TIMEOUT=600 spin "claude update ($o)" "su - '$o' -c '${PREFIX}\"$p\" update'" || fn_install_claude_native_for "$o" || fn_install_claude_npm; fi ;;
                     npm-sandbox) fn_install_nodejs_sandboxed || { fn_npm_update_failed "$o"; continue; }
-                                 SPIN_TIMEOUT=900 spin "npm install (песочница)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$NODE_DIR/bin/npm" install -g @anthropic-ai/claude-code@latest)" || fn_npm_update_failed "$o" ;;
-                    npm-global) SPIN_TIMEOUT=900 spin "npm install -g @anthropic-ai/claude-code@latest" "$(fn_npm_cmd "$(command -v npm)" install -g @anthropic-ai/claude-code@latest)" || fn_npm_update_failed "$o" ;;
+                                 SPIN_TIMEOUT=900 spin "npm install $(fn_claude_npm_spec) (песочница)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$NODE_DIR/bin/npm" install -g "$(fn_claude_npm_spec)")" || fn_npm_update_failed "$o" ;;
+                    npm-global) SPIN_TIMEOUT=900 spin "npm install -g $(fn_claude_npm_spec)" "$(fn_npm_cmd "$(command -v npm)" install -g "$(fn_claude_npm_spec)")" || fn_npm_update_failed "$o" ;;
                     npm-local) fn_install_claude_native_for "$o" || fn_install_claude_npm || warn "не удалось обновить для $o" ;;
                 esac ;;
         esac
@@ -831,6 +837,24 @@ EOF
 # ==============================================================================
 # МЕНЮ
 # ==============================================================================
+fn_pin_claude_for_proxy() {   # за proxychains: DISABLE_AUTOUPDATER=1 в ~/.claude/settings.json, иначе Claude обновит себя до бинарника и перестанет ходить в сеть
+    $USE_PROXY_FLAG || return 0
+    local homes=(/root) h u f; for h in /home/*; do [ -d "$h/.claude" ] && homes+=("$h"); done
+    for h in "${homes[@]}"; do
+        f="$h/.claude/settings.json"; u=$(stat -c %U "$h" 2>/dev/null || echo root); [ -d "$h/.claude" ] || continue
+        $OPT_DRY && { echo "   ${C_DIM}[dry-run] $f: env.DISABLE_AUTOUPDATER=1${C_NC}"; continue; }
+        python3 -c '
+import json, sys
+p = sys.argv[1]
+try: d = json.load(open(p, encoding="utf-8"))
+except Exception: d = {}
+d.setdefault("env", {})["DISABLE_AUTOUPDATER"] = "1"
+json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+' "$f" 2>>"$LOG" && { chown "$u:" "$f" 2>/dev/null || true; } || warn "$u: не удалось записать $f (см. $LOG)"
+    done
+    ok "Автообновление Claude выключено (за proxychains работает только $CLAUDE_JS_VERSION)"
+}
+
 fn_finish_message() {
     local cv; cv=$(fn_claude_version /usr/local/bin/claude 2>/dev/null || fn_claude_version "$(command -v claude 2>/dev/null)")
     local who=""; [ -s /root/.config/mw-devkit/key ] && who=$(adflow whoami 2>/dev/null | fn_json employee)
@@ -839,7 +863,7 @@ fn_finish_message() {
     echo
     if [ -n "$cv" ]; then printf '   %sClaude Code%s     версия %s\n' "$C_BOLD" "$C_NC" "$cv"; else printf '   %sClaude Code%s     не установлен\n' "$C_BOLD" "$C_NC"; fi
     if [ -n "$who" ]; then printf '   %sDevKit%s          подключён как %s\n' "$C_BOLD" "$C_NC" "$who"; else printf '   %sDevKit%s          не подключён %s(adflow login)%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"; fi
-    $USE_PROXY_FLAG && printf '   %sСеть%s            через прокси %s:%s\n' "$C_BOLD" "$C_NC" "$PROXY_IP" "$PROXY_PORT"
+    $USE_PROXY_FLAG && printf '   %sСеть%s            через proxychains %s %s:%s   %sClaude закреплён на %s — последняя версия, работающая через прокси%s\n' "$C_BOLD" "$C_NC" "$S_ARR" "$PROXY_IP" "$PROXY_PORT" "$C_DIM" "$CLAUDE_JS_VERSION" "$C_NC"
     echo
     local pc=""; $USE_PROXY_FLAG && pc="proxychains4 "
     printf '   %sЧто дальше%s\n' "$C_BOLD" "$C_NC"
@@ -874,6 +898,7 @@ fn_interactive_menu() {
         0) echo "Отмена."; exit 0 ;;
         *) err "Введите номер пункта 0–5."; exit 1 ;;
     esac
+    fn_pin_claude_for_proxy
     fn_finish_message
     if [ "$CHOICE" = "2" ] && [ -x "$DEMO_DIR/start_vibe.sh" ] && ! $OPT_YES && ! $OPT_DRY; then
         echo; info "Запускаю демо-стенд через 5 секунд ${C_DIM}(Ctrl+b, d — отключиться от tmux)${C_NC}"; sleep 5; "$DEMO_DIR/start_vibe.sh"
