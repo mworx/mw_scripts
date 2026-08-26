@@ -1,6 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # Установщик MEDIA WORKS: Claude Code, MW DevKit, Docker & Presale Demo Stack
+#   Запускать из КОРНЯ ПРОЕКТА (например cd /home/bitrix) — DevKit привязывает Claude к проекту по текущему каталогу.
 #   bash install-proxy.sh                      — интерактивное меню
 #   bash install-proxy.sh update               — мастер обновления: все установки Claude + DevKit (с вопросами)
 #   bash install-proxy.sh update --yes         — то же без вопросов (рекомендуемые ответы)
@@ -112,10 +113,28 @@ fn_show_logo() {
     printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
     printf '  %sУстановщик MEDIA WORKS%s   %sClaude Code %s MW DevKit %s Docker %s Presale Demo Stack%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$S_DOT" "$S_DOT" "$S_DOT" "$C_NC"
     printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
+    if fn_is_home_dir; then printf '  %sКаталог проекта: %s — это домашний каталог, запускайте из корня проекта%s\n' "$C_YELLOW" "$(pwd -P)" "$C_NC"
+    else printf '  %sКаталог проекта:%s %s\n' "$C_DIM" "$C_NC" "$(pwd -P)"; fi
     echo
 }
 
 fn_check_root() { [ "$EUID" -ne 0 ] && { err "Запуск только от root (или sudo)."; exit 1; }; return 0; }
+
+fn_is_home_dir() {   # /, /root, /home/<user>, $HOME — не каталог проекта
+    local d; d=$(pwd -P)
+    [ "$d" = "/" ] || [ "$d" = "/root" ] || [ "$d" = "${HOME:-/root}" ] || [[ "$d" =~ ^/home/[^/]+/?$ ]] || [ "$d" = "/tmp" ]
+}
+
+fn_require_project_dir() {   # DevKit привязывает Claude к проекту по текущему каталогу — запуск должен быть из него
+    if fn_is_home_dir && ! $OPT_YES; then
+        echo
+        err "Вы в каталоге $(pwd -P) — это домашний каталог, а не проект."
+        info "Установщик привязывает Claude к проекту по каталогу, из которого запущен. Перейдите в корень проекта и запустите снова:"
+        printf '   %scd /home/bitrix && bash %s%s\n' "$C_BOLD" "$(basename "$0")" "$C_NC"
+        info "${C_DIM}(для Битрикса корень проекта — /home/bitrix, не /home/bitrix/www)${C_NC}"
+        exit 1
+    fi
+}
 
 fn_detect_os() {
     [ -f /etc/os-release ] || { err "Не удалось определить ОС."; exit 1; }
@@ -542,7 +561,7 @@ PY"
     ok "Старый backlog-add у $u отключён — журнал работ теперь ведёт DevKit"
 }
 
-fn_as_user() { local u="$1"; shift; if [ "$u" = root ]; then "$@"; else su - "$u" -c "$*"; fi; }
+fn_as_user() { local u="$1"; shift; if [ "$u" = root ]; then "$@"; else su - "$u" -c "cd '$(pwd -P)' && $*"; fi; }
 fn_json() { python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -550,16 +569,18 @@ for k in '$1'.split('.'):
     d=d.get(k) if isinstance(d,dict) else None
 print('' if d is None else d)" 2>/dev/null; }
 
-fn_devkit_login() {   # $1 = пользователь; красивый диалог входа, JSON CLI наружу не показываем
-    local u="$1" out
-    echo; printf '   %sВход в DevKit%s — %s: код придёт вам в Битрикс24 личным сообщением\n' "$C_BOLD" "$C_NC" "$u"
+fn_devkit_login() {   # $1 = пользователь: вход по e-mail → код → выбор проекта (только коды, один раз) → привязка каталога → код ПМа
+    local u="$1" out state
+    echo; printf '   %sВход в DevKit%s — %s: код придёт вам в Битрикс24 и на почту; затем выберите проект для каталога %s\n' "$C_BOLD" "$C_NC" "$u" "$(pwd -P)"
     read -p "   Рабочий e-mail: " email <"$IN"; [ -z "$email" ] && { warn "e-mail не введён — пропускаю"; return 1; }
-    out=$(fn_as_user "$u" adflow login --email "$email" 2>/dev/null <"$IN") || { err "Вход не выполнен: $(echo "$out" | fn_json error)"; return 1; }
+    out=$(fn_as_user "$u" adflow login --email "$email" <"$IN") || { err "Вход не выполнен: $(echo "$out" | fn_json error)"; return 1; }
     ok "Вы вошли как ${C_BOLD}$(echo "$out" | fn_json employee)${C_NC}"
-    local list; list=$(echo "$out" | python3 -c "
-import sys,json
-for p in json.load(sys.stdin).get('projects', []): print(f\"     {p['code']:<24} {p['name']}  [{p['role']}]\")" 2>/dev/null)
-    if [ -n "$list" ]; then printf '   %sВаши проекты%s %s(показываются один раз — запомните код нужного)%s\n%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC" "$list"; fi
+    state=$(echo "$out" | fn_json link.state)
+    case "$state" in
+        approved) ok "Каталог $(pwd -P) подключён к проекту ${C_BOLD}$(echo "$out" | fn_json link.project.code)${C_NC}" ;;
+        pending)  ok "Проект $(echo "$out" | fn_json link.project.code): ждёт подтверждения ПМа (код у него или кнопка в AdFlow); пока — гостевой режим" ;;
+        guest)    info "Гостевой режим: записи копятся на вас, ПМ привяжет их к проекту" ;;
+    esac
     return 0
 }
 
@@ -570,29 +591,13 @@ fn_devkit_update() {   # $1 = пользователь
     ok "Инструкции и хуки Claude обновлены ${C_DIM}(версия $(echo "$out" | fn_json version))${C_NC}"
 }
 
-fn_devkit_link_prompt() {   # привязать проект прямо сейчас (можно пропустить)
-    local u="$1" dir out state
-    echo; printf '   %sПроект%s — подключение подтверждается кодом, который придёт ПМу проекта (Битрикс24 и почта).\n' "$C_BOLD" "$C_NC"
-    read -p "   Каталог проекта ${C_DIM}(Enter — пропустить, позже: cd <проект> && adflow link)${C_NC}: " dir <"$IN"
-    [ -z "$dir" ] && { info "${C_DIM}пока — гостевой режим: записи копятся на вас, ПМ привяжет их к проекту${C_NC}"; return 0; }
-    [ -d "$dir" ] || { warn "каталога $dir нет — привяжете позже"; return 0; }
-    read -p "   Код проекта ${C_DIM}(Enter — гостевой режим)${C_NC}: " code <"$IN"
-    if [ -z "$code" ]; then (cd "$dir" && fn_as_user "$u" adflow link --guest >/dev/null 2>&1); ok "Гостевой режим в $dir — ПМ привяжет записи к проекту"; return 0; fi
-    out=$(cd "$dir" && fn_as_user "$u" adflow link "$code" <"$IN"); state=$(echo "$out" | fn_json state)
-    case "$state" in
-        approved) ok "Проект ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC} подключён к $dir" ;;
-        pending)  ok "Проект ${C_BOLD}$(echo "$out" | fn_json project.name)${C_NC}: ждёт подтверждения (код у ПМа или кнопка в AdFlow); пока — гостевой режим. Повторить позже: cd $dir && adflow link $code" ;;
-        *)        warn "не подключён: $(echo "$out" | fn_json error)" ;;
-    esac
-}
-
 fn_apply_devkit() {
     command -v python3 >/dev/null 2>&1 || fn_prepare_minimal
     spin "Утилита adflow" "${PREFIX}curl -fsSL --max-time 60 '$ADFLOW_URL/devkit/cli' -o /usr/local/bin/adflow && chmod 755 /usr/local/bin/adflow" || return 1
     for ent in "${PLAN_USERS[@]}"; do
         IFS='|' read -r u h dk lg <<<"$ent"
         case "$dk" in
-            login) if fn_devkit_login "$u"; then fn_devkit_update "$u"; fn_devkit_link_prompt "$u"; else warn "$u: подключить позже — adflow login && adflow update"; fi ;;
+            login) if fn_devkit_login "$u"; then fn_devkit_update "$u"; else warn "$u: подключить позже — в каталоге проекта adflow login && adflow update"; fi ;;
             update) fn_devkit_update "$u" ;;
         esac
         [ "$lg" = off ] && fn_migrate_legacy_backlog "$h" "$u"
@@ -777,7 +782,7 @@ fn_finish_message() {
     local pc=""; $USE_PROXY_FLAG && pc="proxychains4 -q "
     printf '   %sЧто дальше%s\n' "$C_BOLD" "$C_NC"
     printf '   %s1%s  Запустите %s%sclaude%s, внутри — команда %s/login%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$pc" "$C_NC" "$C_BOLD" "$C_NC"
-    printf '   %s2%s  В каталоге проекта: %sadflow link <код проекта>%s %s(подтверждается кодом из Битрикс24 у ПМа; или adflow link --guest)%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
+    printf '   %s2%s  Другой проект/каталог: %sadflow login%s там же %s(выбор проекта показывается только после кода входа)%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
     printf '   %s3%s  Работайте как обычно, в конце скажите Claude %s«закрой таск»%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC"
     echo; printf '   %sЕсли в этой же сессии «claude» не находится — выполните hash -r или откройте новый терминал. Лог: %s%s\n' "$C_DIM" "$LOG" "$C_NC"
     hr
@@ -799,11 +804,11 @@ fn_interactive_menu() {
     local CHOICE="$OPT_PROFILE"
     [ -z "$CHOICE" ] && { read -p "   ${S_ARR} " CHOICE <"$IN"; }
     case "$CHOICE" in
-        1) STEP_TOTAL=4; fn_setup_proxy; fn_prepare_minimal; fn_install_claude_smart; fn_setup_devkit ;;
+        1) fn_require_project_dir; STEP_TOTAL=4; fn_setup_proxy; fn_prepare_minimal; fn_install_claude_smart; fn_setup_devkit ;;
         2) STEP_TOTAL=7; fn_setup_proxy; fn_prepare_full; fn_install_docker; fn_install_claude_smart; fn_deploy_presale_stack; fn_setup_devkit ;;
-        3) STEP_TOTAL=6; fn_setup_proxy; fn_prepare_full; fn_install_docker; fn_install_claude_smart; fn_setup_devkit ;;
+        3) fn_require_project_dir; STEP_TOTAL=6; fn_setup_proxy; fn_prepare_full; fn_install_docker; fn_install_claude_smart; fn_setup_devkit ;;
         4) STEP_TOTAL=1; fn_setup_proxy; exit 0 ;;
-        5) STEP_TOTAL=7; fn_setup_proxy; fn_prepare_minimal; fn_update_wizard ;;
+        5) fn_require_project_dir; STEP_TOTAL=7; fn_setup_proxy; fn_prepare_minimal; fn_update_wizard ;;
         0) echo "Отмена."; exit 0 ;;
         *) err "Введите номер пункта 0–5."; exit 1 ;;
     esac
