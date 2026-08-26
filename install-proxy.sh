@@ -282,9 +282,15 @@ fn_proxy_read_existing() {   # уже настроенный proxychains → п�
 
 fn_urlenc() { python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 
-fn_direct_test() {   # без прокси: доступен ли claude.ai напрямую
+fn_direct_test() {   # без прокси: доступен ли claude.ai напрямую (нативный установщик)
     local code; code=$(curl -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
     if [ "$code" = "200" ]; then NATIVE_OK=true; else NATIVE_OK=false; info "${C_DIM}claude.ai напрямую закрыт — Claude поставим через npm${C_NC}"; fi
+}
+fn_api_direct_ok() {   # работает ли сам API Anthropic напрямую: 401 = дошли до API (ключ фиктивный), 403/таймаут = регион/сеть закрыты
+    local code; code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 -X POST https://api.anthropic.com/v1/messages \
+        -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
+    echo "$(date '+%F %T') api.anthropic.com напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
+    [ "$code" = "401" ] || [ "$code" = "400" ]
 }
 
 fn_curl_px() {   # curl через SOCKS5 с кредами из stdin-конфига (пароль не светится в ps); остальные аргументы — как у curl
@@ -352,13 +358,15 @@ fn_setup_proxy() {
     if [ "$OPT_PROXY" = "adflow" ]; then fn_proxy_from_adflow || { err "Не удалось получить прокси из AdFlow"; exit 1; }
     elif [ -n "$OPT_PROXY" ]; then
         PROXY_IP=$(echo "$OPT_PROXY" | cut -d: -f1); PROXY_PORT=$(echo "$OPT_PROXY" | cut -d: -s -f2); PROXY_PASS=$(echo "$OPT_PROXY" | cut -d: -s -f3-)
-    elif fn_proxy_read_existing; then
-        choose "Сеть: прокси ${PROXY_IP}:${PROXY_PORT} уже настроен" 1 "Использовать его" "Настроить заново"
-        [ "$CHOSEN" = 2 ] && PROXY_IP=""
+    elif fn_proxy_read_existing; then   # прокси уже настроен: молча проверяем; вопрос — только если он не работает
+        info "Прокси ${PROXY_IP}:${PROXY_PORT} уже настроен, проверяю…"
+        if fn_proxy_test; then fn_proxy_finish; return 0; fi
+        warn "прокси ${PROXY_IP}:${PROXY_PORT} не отвечает"
+        choose "Сеть:" 1 "Настроить прокси заново" "Работать без прокси"
+        case "$CHOSEN" in 2) USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0;; esac; PROXY_IP=""
     fi
     if [ -z "$PROXY_IP" ] && [ "$OPT_PROXY" != "none" ]; then
-        local direct; direct=$(curl -sSL -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 https://claude.ai/install.sh 2>>"$LOG")
-        if [ "$direct" = "200" ]; then ok "Интернет есть, claude.ai открывается напрямую — прокси не нужен"; NATIVE_OK=true; USE_PROXY_FLAG=false; PREFIX=""; return 0; fi
+        if fn_api_direct_ok; then ok "API Anthropic открыт напрямую — прокси не нужен"; fn_direct_test; USE_PROXY_FLAG=false; PREFIX=""; return 0; fi
         if fn_adflow_direct; then
             choose "claude.ai отсюда не открывается. Прокси:" 1 "Взять из AdFlow (после входа в DevKit)" "Ввести вручную" "Работать без прокси"
             case "$CHOSEN" in 1) fn_proxy_from_adflow || warn "не получилось — введите вручную";; 3) USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0;; esac
@@ -374,7 +382,10 @@ fn_setup_proxy() {
     [ -z "$PROXY_PORT" ] && PROXY_PORT=1080
     case "$PROXY_PASS$PROXY_USER" in *[[:space:]]*) err "Логин/пароль прокси с пробелами proxychains не поддерживает."; exit 1;; esac
     info "Проверка прокси ${PROXY_IP}:${PROXY_PORT}…"
-    if fn_proxy_test; then ok "Прокси ${PROXY_IP}:${PROXY_PORT} работает"; else err "Через прокси не открываются ни claude.ai, ни registry.npmjs.org — проверьте IP/порт/пароль."; exit 1; fi
+    if fn_proxy_test; then :; else err "Через прокси не открываются ни claude.ai, ни registry.npmjs.org — проверьте IP/порт/пароль."; exit 1; fi
+    fn_proxy_finish
+}
+fn_proxy_finish() {   # прокси проверен: proxychains, конфиги (свой и личные копии пользователям), флаги
     $NATIVE_OK || info "${C_DIM}claude.ai через этот прокси закрыт — Claude поставим через npm${C_NC}"
 
     if ! command -v proxychains4 >/dev/null 2>&1; then
@@ -387,7 +398,7 @@ fn_setup_proxy() {
     # и молча виснет Claude Code («No response from API», инцидент 2026-08-26). DNS резолвится локально, через прокси идёт только TCP.
     fn_proxy_conf_path
     fn_write_proxychains_conf "$PROXYCHAINS_CONF_FILE" root
-    ok "Proxychains ${S_ARR} ${PROXY_IP}:${PROXY_PORT}"
+    ok "Сеть: через прокси ${PROXY_IP}:${PROXY_PORT} (проверен)"
     USE_PROXY_FLAG=true; PREFIX="proxychains4 -q "
     # /etc/proxychains*.conf с паролем — только root (600). Пользователям, у которых есть Claude, — личная копия ~/.proxychains/proxychains.conf (proxychains-ng читает её первой)
     local h u; for h in /home/*; do
@@ -585,6 +596,7 @@ fn_install_claude_smart() {   # auto: нативный → при недосту
 # МАСТЕР ОБНОВЛЕНИЯ: Claude Code + миграция backlog-add + DevKit (диалоговый)
 # ==============================================================================
 PLAN=()            # строки плана «что сделаем»
+PLAN_RISKY=false   # есть ли в плане что-то, что стоит подтвердить (замена установки, вход, отключение старого, Docker)
 PLAN_CLAUDE=()     # path|type|owner|action  (update|native|skip)
 PLAN_USERS=()      # user|home|devkit(login|update|skip)|legacy(off|keep)
 
@@ -607,30 +619,39 @@ fn_wizard_claude() {
         elif [ -n "$latest" ]; then mark="${C_YELLOW}есть новее: $latest${C_NC}"; fi
         printf '   %s%s%s  Claude Code %s%s%s %s %s%s%s   %s\n' "$C_CYAN" "$i" "$C_NC" "$C_BOLD" "${v:-?}" "$C_NC" "$S_DOT" "$C_DIM" "$(fn_type_label "$t"), $o" "$C_NC" "$mark"
         printf '      %s%s%s\n' "$C_DIM" "$p" "$C_NC"; done <<<"$list"
-    choose "Claude Code:" 1 "Обновить до последней версии" "Решить по каждой установке" "Оставить как есть"
-    local mode; case "$CHOSEN" in 1) mode=a;; 2) mode=o;; *) return 0;; esac
+    # решение без лишних вопросов: актуальная npm-установка — ничего; нативная — тихий «claude update» (он сам решает, есть ли новее);
+    # npm-установка со старой версией — один вопрос на всё; «решить по каждой» — только если установок несколько
+    local outdated=0 n_inst=0
+    while IFS='|' read -r p t v o; do [[ "$t" == wrapper || "$t" == symlink* ]] && continue; n_inst=$((n_inst+1))
+        [ "$t" != native ] && [ -n "$latest" ] && [ "$v" != "$latest" ] && outdated=$((outdated+1)); done <<<"$list"
+    local mode=a
+    if [ "$outdated" -gt 0 ]; then
+        if [ "$n_inst" -gt 1 ]; then choose "Есть новее ($latest):" 1 "Обновить все установки" "Решить по каждой" "Оставить как есть"; case "$CHOSEN" in 1) mode=a;; 2) mode=o;; *) mode=n;; esac
+        else ask "Обновить Claude Code до $latest? (Y/n):" Y && mode=a || mode=n; fi
+    else ok "Claude Code актуален"; fi
     while IFS='|' read -r p t v o; do
         [[ "$t" == wrapper || "$t" == symlink* ]] && continue      # обёртки/симлинки обновляются вместе с целью
         if $OPT_YES && ! $OPT_ALL_USERS && [ "$o" != root ]; then info "${C_DIM}$o: установка другого пользователя — в --yes не трогаю (нужен --all-users)${C_NC}"; continue; fi
-        local act="update"
-        if [ "$mode" = "o" ]; then
+        local act="skip"
+        if [ "$t" = native ]; then act="update"                                           # официальный канал: дёшево и безопасно, без вопросов
+        elif [ -n "$latest" ] && [ "$v" = "$latest" ]; then act="skip"
+        elif [ "$mode" = a ]; then
+            if [[ "$t" == npm-global || "$t" == npm-local ]] && ! fn_is_centos7 && $NATIVE_OK; then act="native"; else act="update"; fi
+        elif [ "$mode" = o ]; then
             if [[ "$t" == npm-global || "$t" == npm-local ]] && ! fn_is_centos7 && $NATIVE_OK; then
                 choose "Claude ${v:-?} ($(fn_type_label "$t"), $o):" 1 "Заменить официальной установкой Anthropic" "Обновить как есть, через npm" "Не трогать"
                 case "$CHOSEN" in 1) act="native";; 2) act="update";; *) act="skip";; esac
-            elif [ "$t" = native ]; then
-                choose "Claude ${v:-?} (официальная, $o):" 1 "Обновить" "Переустановить через npm" "Не трогать"
-                case "$CHOSEN" in 1) act="update";; 2) act="npm";; *) act="skip";; esac
             else
                 choose "Claude ${v:-?} ($(fn_type_label "$t"), $o):" 1 "Обновить через npm" "Не трогать"
                 case "$CHOSEN" in 1) act="update";; *) act="skip";; esac
             fi
-        elif [[ "$t" == npm-global || "$t" == npm-local ]] && ! fn_is_centos7 && $NATIVE_OK; then act="native"; fi
+        fi
         [ "$act" = "skip" ] && continue
         PLAN_CLAUDE+=("$p|$t|$o|$act")
         case "$act" in
-            update) PLAN+=("Обновить Claude Code ($(fn_type_label "$t"), $o)");;
-            native) PLAN+=("Перейти на официальный Claude Code, старую npm-установку убрать ($o)");;
-            npm) PLAN+=("Переустановить Claude Code через npm ($o)");;
+            update) [ "$t" = native ] && PLAN+=("Проверить обновления официального Claude Code ($o)") || PLAN+=("Обновить Claude Code до $latest ($(fn_type_label "$t"), $o)");;
+            native) PLAN+=("Перейти на официальный Claude Code, старую npm-установку убрать ($o)"); PLAN_RISKY=true;;
+            npm) PLAN+=("Переустановить Claude Code через npm ($o)"); PLAN_RISKY=true;;
         esac
     done <<<"$list"
     if [ -L /usr/local/bin/claude ] && [[ "$(readlink -f /usr/local/bin/claude)" == /root/* ]]; then
@@ -661,15 +682,14 @@ fn_wizard_devkit() {
         IFS='|' read -r u h <<<"$ent"; IFS='|' read -r k l pr <<<"$(fn_user_devkit_state "$h")"
         local dk="skip" lg="keep"
         if $OPT_YES && ! $OPT_ALL_USERS && [ "$u" != root ]; then info "${C_DIM}$u: в --yes настройки другого пользователя не трогаю (нужен --all-users)${C_NC}"; PLAN_USERS+=("$u|$h|skip|keep"); continue; fi
-        if [ "$k" = yes ]; then
-            choose "$u — DevKit уже подключён:" 1 "Обновить инструкции и хуки" "Не трогать"; [ "$CHOSEN" = 1 ] && dk="update"
+        if [ "$k" = yes ]; then dk="update"                                       # обновление скилла/хуков идемпотентно — без вопросов
         else
             if $OPT_YES; then warn "$u: DevKit не подключён — вход интерактивный, выполните позже: adflow login && adflow update"
-            else choose "$u — подключить DevKit?" "$([ "$u" = root ] && echo 1 || echo 2)" "Да, сейчас (e-mail, код придёт в Битрикс24)" "Позже"; [ "$CHOSEN" = 1 ] && dk="login"; fi
+            else choose "$u — подключить DevKit?" "$([ "$u" = root ] && echo 1 || echo 2)" "Да, сейчас (e-mail, код придёт в Битрикс24)" "Позже"; [ "$CHOSEN" = 1 ] && { dk="login"; PLAN_RISKY=true; }; fi
         fi
         if [ "$l" = yes ]; then
             if $OPT_KEEP_LEGACY; then lg="keep"
-            else choose "$u — старый backlog-add (Google-таблица):" "$([ "$dk" = skip ] && echo 2 || echo 1)" "Отключить — журнал теперь ведёт DevKit" "Оставить"; [ "$CHOSEN" = 1 ] && lg="off"; fi
+            else choose "$u — старый backlog-add (Google-таблица):" "$([ "$dk" = skip ] && echo 2 || echo 1)" "Отключить — журнал теперь ведёт DevKit" "Оставить"; [ "$CHOSEN" = 1 ] && { lg="off"; PLAN_RISKY=true; }; fi
         fi
         PLAN_USERS+=("$u|$h|$dk|$lg")
         case "$dk" in login) PLAN+=("Подключить $u к DevKit (вход по e-mail, код из Битрикс24)");; update) PLAN+=("Обновить инструкции и хуки DevKit для $u");; esac
@@ -777,24 +797,24 @@ fn_apply_devkit() {
 }
 
 fn_update_wizard() {
-    PLAN=(); PLAN_CLAUDE=(); PLAN_USERS=()
+    PLAN=(); PLAN_CLAUDE=(); PLAN_USERS=(); PLAN_RISKY=false
     fn_wizard_claude
     fn_wizard_devkit
     step "План"
-    if [ ${#PLAN[@]} -eq 0 ]; then ok "Делать нечего."; return 0; fi
+    if [ ${#PLAN[@]} -eq 0 ]; then ok "Всё актуально, делать нечего."; return 0; fi
     local n=0; for x in "${PLAN[@]}"; do n=$((n+1)); printf '   %s%s%s %s\n' "$C_CYAN" "$S_OK" "$C_NC" "$x"; done
     $OPT_DRY && info "${C_DIM}режим проверки: команды только печатаются${C_NC}"
-    ask "Поехали? (Y/n):" Y || { warn "Отменено."; return 0; }
-    step "Claude Code"; fn_apply_claude
+    if $PLAN_RISKY; then ask "Поехали? (Y/n):" Y || { warn "Отменено."; return 0; }; fi   # обновления безопасны и обратимы — без переспроса
+    [ ${#PLAN_CLAUDE[@]} -gt 0 ] && { step "Claude Code"; fn_apply_claude; }
     step "MW DevKit"; fn_apply_devkit
 }
 
 # совместимость: старые имена
 fn_update_all_claude() { fn_update_wizard; }
 fn_setup_devkit() {
-    PLAN=(); PLAN_CLAUDE=(); PLAN_USERS=(); fn_wizard_devkit
-    echo; local n=0; for x in "${PLAN[@]}"; do n=$((n+1)); echo "  $n. $x"; done
-    ask "Выполнить? (Y/n):" Y && fn_apply_devkit
+    PLAN=(); PLAN_CLAUDE=(); PLAN_USERS=(); PLAN_RISKY=false; fn_wizard_devkit
+    [ ${#PLAN[@]} -eq 0 ] && return 0
+    fn_apply_devkit   # всё, что здесь, пользователь уже выбрал вопросами выше — второй раз не спрашиваем
 }
 
 # ==============================================================================
@@ -965,8 +985,8 @@ fn_finish_message() {
     printf '   %s2%s  Другой проект/каталог: %sadflow login%s там же %s(выбор проекта показывается только после кода входа)%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
     printf '   %s3%s  Работайте как обычно, в конце скажите Claude %s«закрой таск»%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC"
     printf '   %sОт root без запросов подтверждения: IS_SANDBOX=1 %sclaude --dangerously-skip-permissions%s\n' "$C_DIM" "$pc" "$C_NC"
-    local baks; baks=$(ls -d /usr/local/bin/claude.bak.* /etc/proxychains*.conf.bak.* /root/.claude/settings.json.bak.* 2>/dev/null | tr '\n' ' ')
-    [ -n "$baks" ] && printf '   %sБэкапы прежних файлов: %s%s\n' "$C_DIM" "$baks" "$C_NC"
+    local baks; baks=$(ls -d /usr/local/bin/claude.bak.$TS /etc/proxychains*.conf.bak.$TS /root/.proxychains/proxychains.conf.bak.$TS /home/*/.proxychains/proxychains.conf.bak.$TS /root/.claude/settings.json.bak.$TS 2>/dev/null | tr '\n' ' ')
+    [ -n "$baks" ] && printf '   %sПрежние версии файлов сохранены: %s%s\n' "$C_DIM" "$baks" "$C_NC"
     echo; printf '   %sЕсли в этой же сессии «claude» не находится — выполните hash -r или откройте новый терминал. Лог: %s%s\n' "$C_DIM" "$LOG" "$C_NC"
     hr
 }
