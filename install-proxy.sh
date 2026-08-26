@@ -113,7 +113,7 @@ fn_show_logo() {
     printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
     printf '  %sУстановщик MEDIA WORKS%s   %sClaude Code %s MW DevKit %s Docker %s Presale Demo Stack%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$S_DOT" "$S_DOT" "$S_DOT" "$C_NC"
     printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
-    if fn_is_web_root; then printf '  %sКаталог проекта: %s — это веб-корень (www), запускайте уровнем выше%s\n' "$C_RED" "$(pwd -P)" "$C_NC"
+    if fn_is_web_root; then printf '  %sКаталог проекта: %s — похоже на веб-корень (www), потребуется подтверждение%s\n' "$C_YELLOW" "$(pwd -P)" "$C_NC"
     elif fn_is_home_dir; then printf '  %sКаталог проекта: %s — это домашний каталог, запускайте из корня проекта%s\n' "$C_YELLOW" "$(pwd -P)" "$C_NC"
     else printf '  %sКаталог проекта:%s %s\n' "$C_DIM" "$C_NC" "$(pwd -P)"; fi
     echo
@@ -138,13 +138,14 @@ fn_is_web_root() {   # веб-корень (www, public_html, htdocs, public) �
 }
 
 fn_require_project_dir() {   # DevKit привязывает Claude к проекту по текущему каталогу — запуск должен быть из него
-    if fn_is_web_root && ! $OPT_YES; then
+    if fn_is_web_root && ! $OPT_YES; then   # похоже на веб-корень — предупреждаем, решение за разработчиком (сборки бывают разные: html/ внутри www и т.п.)
         echo
-        err "Вы в каталоге $(pwd -P) — это веб-корень сайта (www)."
-        info "Claude, DevKit и служебные каталоги (.claude, claude_docs, .example) нельзя размещать внутри www — они станут доступны из интернета."
-        info "Запускайте из корня проекта уровнем выше:"
+        warn "Каталог $(pwd -P) похож на веб-корень сайта (www)."
+        info "Служебные каталоги Claude и DevKit (.claude, claude_docs, .example) внутри веб-корня могут стать доступны из интернета."
+        info "Обычно установщик запускают из корня проекта уровнем выше:"
         printf '   %scd %s && bash %s%s\n' "$C_BOLD" "$(dirname "$(pwd -P)")" "$(basename "$0")" "$C_NC"
-        exit 1
+        info "${C_DIM}Если в вашей сборке публичный каталог лежит глубже (например, www/html), устанавливать сюда можно.${C_NC}"
+        ask "Вы уверены, что хотите установить в $(pwd -P)? [y/N]" N || { echo; info "Отменено. Перейдите в корень проекта и запустите снова."; exit 1; }
     fi
     if fn_is_home_dir && ! $OPT_YES; then
         echo
