@@ -10,7 +10,7 @@
 set -o pipefail
 
 ADFLOW_URL="${ADFLOW_URL:-https://adflow.mworx.ru/api/v1}"
-NODE_DIR="/opt/vibe-node"; NODE_VER="v20.18.0"; DEMO_DIR="/opt/vibe-demo"
+NODE_DIR="/opt/vibe-node"; NODE_VER="v22.23.2"; NODE_MAJOR=22; DEMO_DIR="/opt/vibe-demo"   # Claude Code ≥ 2.1.246 требует Node ≥ 22; для CentOS 7 есть сборка glibc-217
 PKG_MANAGER=""; OS_ID=""; OS_VERSION=""
 PROXY_IP=""; PROXY_PORT=""; PROXY_USER="proxyuser"; PROXY_PASS=""; PROXYCHAINS_CONF_FILE=""
 USE_PROXY_FLAG=false; PREFIX=""
@@ -373,8 +373,13 @@ fn_install_docker() {
 # ==============================================================================
 # NODE SANDBOX И CLAUDE CODE
 # ==============================================================================
-fn_install_nodejs_sandboxed() {
-    [ -x "$NODE_DIR/bin/node" ] && return 0
+fn_install_nodejs_sandboxed() {   # ставит песочницу; если уже есть, но старше NODE_MAJOR — обновляет (старая уезжает в $NODE_DIR.old)
+    if [ -x "$NODE_DIR/bin/node" ]; then
+        local cur; cur=$("$NODE_DIR/bin/node" -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+        [ "${cur:-0}" -ge "$NODE_MAJOR" ] 2>/dev/null && return 0
+        warn "Node.js в песочнице v${cur:-?} — Claude Code требует ≥ $NODE_MAJOR, обновляю"
+        run "rm -rf '$NODE_DIR.old'; mv '$NODE_DIR' '$NODE_DIR.old'"
+    fi
     STEP_TOTAL=$((STEP_TOTAL+1)); step "Node.js $NODE_VER (песочница $NODE_DIR)"
     mkdir -p "$NODE_DIR"; local tmp; tmp=$(mktemp -d)
     local file url tarflag
@@ -387,7 +392,8 @@ fn_install_nodejs_sandboxed() {
     SPIN_TIMEOUT=600 spin "Скачивание Node.js $NODE_VER" "$(fn_net_prefix "$url")curl -fsSL --retry 2 '$url' -o '$tmp/$file'" || { rm -rf "$tmp"; return 1; }
     [ -s "$tmp/$file" ] || { err "архив Node.js пустой — сеть до nodejs.org недоступна (см. $LOG)"; rm -rf "$tmp"; return 1; }
     run "tar $tarflag '$tmp/$file' -C '$NODE_DIR' --strip-components=1"; rm -rf "$tmp"
-    [ -x "$NODE_DIR/bin/node" ] || { err "Node.js не распаковался (см. $LOG)"; return 1; }
+    [ -x "$NODE_DIR/bin/node" ] || { err "Node.js не распаковался (см. $LOG)"; [ -d "$NODE_DIR.old" ] && run "rm -rf '$NODE_DIR'; mv '$NODE_DIR.old' '$NODE_DIR'"; return 1; }
+    rm -rf "$NODE_DIR.old" 2>/dev/null
     ok "Node.js $("$NODE_DIR/bin/node" --version 2>/dev/null)"
 }
 
@@ -425,7 +431,7 @@ fn_install_claude_native_for() {   # $1 = пользователь; нативн
     [ -x "$home/.local/bin/claude" ]
 }
 
-fn_system_node_ok() { command -v node >/dev/null 2>&1 && [ "$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)" -ge 18 ] 2>/dev/null; }
+fn_system_node_ok() { command -v node >/dev/null 2>&1 && [ "$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)" -ge "$NODE_MAJOR" ] 2>/dev/null; }
 
 fn_install_claude_npm() {   # второй способ: npm из registry.npmjs.org — системный Node ≥ 18 или песочница /opt/vibe-node
     local npm_bin="npm" node_hint="системный Node $(node -v 2>/dev/null)"
@@ -543,7 +549,11 @@ fn_user_devkit_state() {   # $1 home → "key|legacy|projects"
 fn_wizard_devkit() {
     step "MW DevKit"
     info "${C_DIM}вход по рабочему e-mail (код в Битрикс24); права — по роли в проекте; скилл и хуки — из AdFlow${C_NC}"
-    local users=("root|/root"); for h in /home/*; do [ -d "$h/.claude" ] && users+=("$(stat -c %U "$h")|$h"); done
+    local users=("root|/root"); for h in /home/*; do
+        [ -d "$h/.claude" ] || continue
+        if [ -d "$h/.claude/projects" ] || [ -s "$h/.config/mw-devkit/key" ] || [ -d "$h/.claude/skills/backlog-add" ]; then users+=("$(stat -c %U "$h")|$h")
+        else info "${C_DIM}$(stat -c %U "$h"): каталог ~/.claude есть, но Claude под этим пользователем не запускался — пропускаю${C_NC}"; fi
+    done
     for ent in "${users[@]}"; do IFS='|' read -r u h <<<"$ent"; IFS='|' read -r k l pr <<<"$(fn_user_devkit_state "$h")"
         printf '   %s%s%s  %s%s%s %s %s\n' "$C_CYAN" "$S_DOT" "$C_NC" "$C_BOLD" "$u" "$C_NC" "$S_DOT" "$([ $k = yes ] && echo "${C_GREEN}подключён${C_NC}" || echo "не подключён")$([ $l = yes ] && echo ", старый backlog-add (Google-таблица)")$([ "$pr" -gt 0 ] && echo ", проектов: $pr")"; done
     for ent in "${users[@]}"; do
@@ -586,7 +596,8 @@ fn_apply_claude() {
                     native)
                         if [ "$o" = root ]; then SPIN_TIMEOUT=600 spin "claude update ($o)" "${PREFIX}'$p' update" || fn_install_claude_native_for root || fn_install_claude_npm
                         else SPIN_TIMEOUT=600 spin "claude update ($o)" "su - '$o' -c '${PREFIX}\"$p\" update'" || fn_install_claude_native_for "$o" || fn_install_claude_npm; fi ;;
-                    npm-sandbox) SPIN_TIMEOUT=900 spin "npm install (песочница)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$NODE_DIR/bin/npm" install -g @anthropic-ai/claude-code@latest)" || fn_npm_update_failed "$o" ;;
+                    npm-sandbox) fn_install_nodejs_sandboxed || { fn_npm_update_failed "$o"; continue; }
+                                 SPIN_TIMEOUT=900 spin "npm install (песочница)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$NODE_DIR/bin/npm" install -g @anthropic-ai/claude-code@latest)" || fn_npm_update_failed "$o" ;;
                     npm-global) SPIN_TIMEOUT=900 spin "npm install -g @anthropic-ai/claude-code@latest" "$(fn_npm_cmd "$(command -v npm)" install -g @anthropic-ai/claude-code@latest)" || fn_npm_update_failed "$o" ;;
                     npm-local) fn_install_claude_native_for "$o" || fn_install_claude_npm || warn "не удалось обновить для $o" ;;
                 esac ;;
@@ -830,7 +841,7 @@ fn_finish_message() {
     if [ -n "$who" ]; then printf '   %sDevKit%s          подключён как %s\n' "$C_BOLD" "$C_NC" "$who"; else printf '   %sDevKit%s          не подключён %s(adflow login)%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"; fi
     $USE_PROXY_FLAG && printf '   %sСеть%s            через прокси %s:%s\n' "$C_BOLD" "$C_NC" "$PROXY_IP" "$PROXY_PORT"
     echo
-    local pc=""; $USE_PROXY_FLAG && pc="proxychains4 -q "
+    local pc=""; $USE_PROXY_FLAG && pc="proxychains4 "
     printf '   %sЧто дальше%s\n' "$C_BOLD" "$C_NC"
     printf '   %s1%s  Запустите %s%sclaude%s, внутри — команда %s/login%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$pc" "$C_NC" "$C_BOLD" "$C_NC"
     printf '   %s2%s  Другой проект/каталог: %sadflow login%s там же %s(выбор проекта показывается только после кода входа)%s\n' "$C_CYAN" "$C_NC" "$C_BOLD" "$C_NC" "$C_DIM" "$C_NC"
