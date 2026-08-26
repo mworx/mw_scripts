@@ -248,6 +248,28 @@ fn_proxy_test() {   # 0 — интернет есть; NATIVE_OK=false, если
     curl -x "$px" -fsS -o /dev/null --connect-timeout 10 --max-time 25 https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>>"$LOG"
 }
 
+# Прокси нужен только для claude.ai/anthropic; registry.npmjs.org и nodejs.org из РФ доступны напрямую.
+# Node.js через proxychains-ng не работает (fake-DNS 224.x → ECONNREFUSED), поэтому npm идёт напрямую, а если нельзя — через свой socks-прокси (npm ≥ 9).
+declare -A NET_DIRECT=()
+fn_net_prefix() {   # $1 = URL для проверки → печатает "" (напрямую) или "$PREFIX"; результат кэшируется по хосту
+    local url="$1" host; host=$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/]+).*#\1#')
+    if [ -z "${NET_DIRECT[$host]+x}" ]; then
+        if curl -fsS -o /dev/null --connect-timeout 6 --max-time 15 "$url" 2>>"$LOG"; then NET_DIRECT[$host]=yes; echo "$(date '+%F %T') $host: доступен напрямую" >> "$LOG"
+        else NET_DIRECT[$host]=no; echo "$(date '+%F %T') $host: напрямую недоступен → через прокси" >> "$LOG"; fi
+    fi
+    [ "${NET_DIRECT[$host]}" = yes ] && echo "" || echo "$PREFIX"
+}
+fn_npm_cmd() {   # $1 = путь к npm, остальное — аргументы → строка команды для spin: напрямую / socks через npm_config_* / proxychains (старый npm)
+    local npm_bin="$1"; shift; local pfx; pfx=$(fn_net_prefix "https://registry.npmjs.org/-/ping")
+    if [ -z "$pfx" ] || ! $USE_PROXY_FLAG; then printf "'%s' %s" "$npm_bin" "$*"; return; fi
+    local major; major=$("$npm_bin" -v 2>/dev/null | cut -d. -f1)
+    if [ "${major:-0}" -ge 9 ] 2>/dev/null; then
+        local auth=""; [ -n "$PROXY_PASS" ] && auth="$(fn_urlenc "$PROXY_USER"):$(fn_urlenc "$PROXY_PASS")@"
+        local px="socks5h://${auth}${PROXY_IP}:${PROXY_PORT}"
+        printf "npm_config_proxy='%s' npm_config_https_proxy='%s' '%s' %s" "$px" "$px" "$npm_bin" "$*"
+    else printf "%s'%s' %s" "$PREFIX" "$npm_bin" "$*"; fi
+}
+
 fn_adflow_direct() { curl -fsS -o /dev/null --connect-timeout 8 --max-time 20 "$ADFLOW_URL/devkit/install.sh" 2>>"$LOG"; }
 
 fn_ensure_adflow_cli() {   # adflow ставится напрямую с AdFlow (прокси не нужен)
@@ -362,7 +384,7 @@ fn_install_nodejs_sandboxed() {
     else
         file="node-${NODE_VER}-linux-x64.tar.xz"; url="https://nodejs.org/dist/${NODE_VER}/${file}"; tarflag="-xJf"
     fi
-    SPIN_TIMEOUT=600 spin "Скачивание Node.js $NODE_VER" "${PREFIX}curl -fsSL --retry 2 '$url' -o '$tmp/$file'" || { rm -rf "$tmp"; return 1; }
+    SPIN_TIMEOUT=600 spin "Скачивание Node.js $NODE_VER" "$(fn_net_prefix "$url")curl -fsSL --retry 2 '$url' -o '$tmp/$file'" || { rm -rf "$tmp"; return 1; }
     [ -s "$tmp/$file" ] || { err "архив Node.js пустой — сеть до nodejs.org недоступна (см. $LOG)"; rm -rf "$tmp"; return 1; }
     run "tar $tarflag '$tmp/$file' -C '$NODE_DIR' --strip-components=1"; rm -rf "$tmp"
     [ -x "$NODE_DIR/bin/node" ] || { err "Node.js не распаковался (см. $LOG)"; return 1; }
@@ -408,7 +430,8 @@ fn_system_node_ok() { command -v node >/dev/null 2>&1 && [ "$(node -v 2>/dev/nul
 fn_install_claude_npm() {   # второй способ: npm из registry.npmjs.org — системный Node ≥ 18 или песочница /opt/vibe-node
     local npm_bin="npm" node_hint="системный Node $(node -v 2>/dev/null)"
     if ! fn_system_node_ok; then fn_install_nodejs_sandboxed || return 1; npm_bin="$NODE_DIR/bin/npm"; node_hint="песочница $NODE_DIR"; fi
-    SPIN_TIMEOUT=900 spin "Claude Code через npm ($node_hint)" "PATH='$NODE_DIR/bin:$PATH' ${PREFIX}$npm_bin install -g @anthropic-ai/claude-code@latest" || return 1
+    [ "$npm_bin" = npm ] && npm_bin=$(command -v npm)
+    SPIN_TIMEOUT=900 spin "Claude Code через npm ($node_hint)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$npm_bin" install -g @anthropic-ai/claude-code@latest)" || return 1
     local bin; bin=$(PATH="$NODE_DIR/bin:$PATH" command -v claude 2>/dev/null || ls "$NODE_DIR/bin/claude" 2>/dev/null | head -n 1)
     [ -n "$bin" ] || { err "после npm install бинарник claude не найден"; return 1; }
     if [[ "$bin" == "$NODE_DIR/"* ]]; then
@@ -470,7 +493,7 @@ fn_wizard_claude() {
         if ask "Установить Claude Code? (Y/n):" Y; then PLAN+=("Установить Claude Code"); PLAN_CLAUDE+=("|install|root|install"); fi
         return 0
     fi
-    local latest; latest=$(${PREFIX}curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null </dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    local latest; latest=$($(fn_net_prefix "https://registry.npmjs.org/-/ping")curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null </dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     local i=0
     while IFS='|' read -r p t v o; do [[ "$t" == wrapper || "$t" == symlink* ]] && continue; i=$((i+1))
         local mark=""
@@ -542,8 +565,13 @@ fn_wizard_devkit() {
     done
 }
 
+fn_npm_update_failed() {   # npm не обновил Claude: где можно — официальный установщик, иначе внятная ошибка
+    if $NATIVE_OK && ! fn_is_centos7; then warn "npm не сработал — пробую официальный установщик Anthropic"; fn_install_claude_native_for "${1:-root}" && { [ "${1:-root}" = root ] && fn_expose_claude_globally /root/.local/bin/claude; return 0; }; fi
+    err "Claude Code не обновлён (подробности: $LOG)"; return 1
+}
+
 fn_apply_claude() {
-    local latest; latest=$(${PREFIX}curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    local latest; latest=$($(fn_net_prefix "https://registry.npmjs.org/-/ping")curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null | grep -oE '"version": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     for ent in "${PLAN_CLAUDE[@]}"; do
         IFS='|' read -r p t o act <<<"$ent"
         case "$act" in
@@ -558,8 +586,8 @@ fn_apply_claude() {
                     native)
                         if [ "$o" = root ]; then SPIN_TIMEOUT=600 spin "claude update ($o)" "${PREFIX}'$p' update" || fn_install_claude_native_for root || fn_install_claude_npm
                         else SPIN_TIMEOUT=600 spin "claude update ($o)" "su - '$o' -c '${PREFIX}\"$p\" update'" || fn_install_claude_native_for "$o" || fn_install_claude_npm; fi ;;
-                    npm-sandbox) SPIN_TIMEOUT=900 spin "npm install (песочница)" "PATH='$NODE_DIR/bin:$PATH' ${PREFIX}'$NODE_DIR/bin/npm' install -g @anthropic-ai/claude-code@latest" ;;
-                    npm-global) SPIN_TIMEOUT=900 spin "npm install -g @anthropic-ai/claude-code@latest" "${PREFIX}npm install -g @anthropic-ai/claude-code@latest" ;;
+                    npm-sandbox) SPIN_TIMEOUT=900 spin "npm install (песочница)" "PATH='$NODE_DIR/bin:$PATH' $(fn_npm_cmd "$NODE_DIR/bin/npm" install -g @anthropic-ai/claude-code@latest)" || fn_npm_update_failed "$o" ;;
+                    npm-global) SPIN_TIMEOUT=900 spin "npm install -g @anthropic-ai/claude-code@latest" "$(fn_npm_cmd "$(command -v npm)" install -g @anthropic-ai/claude-code@latest)" || fn_npm_update_failed "$o" ;;
                     npm-local) fn_install_claude_native_for "$o" || fn_install_claude_npm || warn "не удалось обновить для $o" ;;
                 esac ;;
         esac
@@ -586,6 +614,7 @@ fn_as_user() { local u="$1"; shift; if [ "$u" = root ]; then "$@"; else su - "$u
 fn_json() { python3 -c "
 import sys,json
 d=json.load(sys.stdin)
+if '$1'=='error' and isinstance(d,dict) and 'error' not in d and isinstance(d.get('detail'),str): d={'error': d['detail']}
 for k in '$1'.split('.'):
     d=d.get(k) if isinstance(d,dict) else None
 print('' if d is None else d)" 2>/dev/null; }
@@ -594,7 +623,7 @@ fn_devkit_login() {   # $1 = пользователь: вход по e-mail → 
     local u="$1" out state
     echo; printf '   %sВход в DevKit%s — %s: код придёт вам в Битрикс24 и на почту; затем выберите проект для каталога %s\n' "$C_BOLD" "$C_NC" "$u" "$(pwd -P)"
     read -p "   Рабочий e-mail: " email <"$IN"; [ -z "$email" ] && { warn "e-mail не введён — пропускаю"; return 1; }
-    out=$(fn_as_user "$u" adflow login --email "$email" <"$IN") || { err "Вход не выполнен: $(echo "$out" | fn_json error)"; return 1; }
+    out=$(fn_as_user "$u" adflow login --email "$email" <"$IN" 2> >(tee -a "$LOG" >&2)) || { local e; e=$(echo "$out" | fn_json error); err "Вход не выполнен: ${e:-ошибка утилиты adflow, подробности: $LOG}"; return 1; }
     ok "Вы вошли как ${C_BOLD}$(echo "$out" | fn_json employee)${C_NC}"
     state=$(echo "$out" | fn_json link.state)
     case "$state" in
@@ -608,13 +637,14 @@ fn_devkit_login() {   # $1 = пользователь: вход по e-mail → 
 fn_devkit_update() {   # $1 = пользователь
     local u="$1" out
     $OPT_DRY && { echo "   ${C_DIM}[dry-run] adflow update ($u)${C_NC}"; return 0; }
-    out=$(fn_as_user "$u" adflow update 2>/dev/null) || { warn "$u: инструкции не обновились: $(echo "$out" | fn_json error)"; return 1; }
+    out=$(fn_as_user "$u" adflow update 2>>"$LOG") || { local e; e=$(echo "$out" | fn_json error); warn "$u: инструкции не обновились: ${e:-см. $LOG}"; return 1; }
     ok "Инструкции и хуки Claude обновлены ${C_DIM}(версия $(echo "$out" | fn_json version))${C_NC}"
 }
 
 fn_apply_devkit() {
     command -v python3 >/dev/null 2>&1 || fn_prepare_minimal
-    spin "Утилита adflow" "${PREFIX}curl -fsSL --max-time 60 '$ADFLOW_URL/devkit/cli' -o /usr/local/bin/adflow && chmod 755 /usr/local/bin/adflow" || return 1
+    spin "Утилита adflow" "curl -fsSL --max-time 60 '$ADFLOW_URL/devkit/cli' -o /usr/local/bin/adflow && chmod 755 /usr/local/bin/adflow" || return 1
+    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' 2>/dev/null || { err "adflow требует Python 3.6+ (сейчас $(python3 --version 2>&1))"; return 1; }
     for ent in "${PLAN_USERS[@]}"; do
         IFS='|' read -r u h dk lg <<<"$ent"
         case "$dk" in
