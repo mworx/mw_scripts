@@ -121,9 +121,15 @@ fn_show_logo() {
 
 fn_check_root() { [ "$EUID" -ne 0 ] && { err "Запуск только от root (или sudo)."; exit 1; }; return 0; }
 
-fn_is_home_dir() {   # /, /root, /home/<user>, $HOME — не каталог проекта
+fn_looks_like_project() {   # признаки корня проекта: веб-корень внутри, git, документация Claude, привязка DevKit, манифесты
     local d; d=$(pwd -P)
-    [ "$d" = "/" ] || [ "$d" = "/root" ] || [ "$d" = "${HOME:-/root}" ] || [[ "$d" =~ ^/home/[^/]+/?$ ]] || [ "$d" = "/tmp" ]
+    [ -d "$d/www" ] || [ -d "$d/public_html" ] || [ -d "$d/htdocs" ] || [ -d "$d/.git" ] || [ -f "$d/CLAUDE.md" ] || [ -d "$d/claude_docs" ] \
+      || [ -f "$d/.mw-devkit" ] || [ -f "$d/composer.json" ] || [ -f "$d/package.json" ] || [ -f "$d/docker-compose.yml" ]
+}
+
+fn_is_home_dir() {   # /, /root, /home/<user>, $HOME, /tmp — не каталог проекта, если в нём нет признаков проекта (/home/bitrix с www/ — проект)
+    local d; d=$(pwd -P)
+    { [ "$d" = "/" ] || [ "$d" = "/root" ] || [ "$d" = "${HOME:-/root}" ] || [[ "$d" =~ ^/home/[^/]+/?$ ]] || [ "$d" = "/tmp" ]; } && ! fn_looks_like_project
 }
 
 fn_is_web_root() {   # веб-корень (www, public_html, htdocs, public) — сюда ничего служебного класть нельзя
