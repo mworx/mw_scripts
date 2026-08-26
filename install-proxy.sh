@@ -113,7 +113,8 @@ fn_show_logo() {
     printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
     printf '  %sУстановщик MEDIA WORKS%s   %sClaude Code %s MW DevKit %s Docker %s Presale Demo Stack%s\n' "$C_BOLD" "$C_NC" "$C_DIM" "$S_DOT" "$S_DOT" "$S_DOT" "$C_NC"
     printf '  %s%s%s\n' "$C_DIM" "$l" "$C_NC"
-    if fn_is_home_dir; then printf '  %sКаталог проекта: %s — это домашний каталог, запускайте из корня проекта%s\n' "$C_YELLOW" "$(pwd -P)" "$C_NC"
+    if fn_is_web_root; then printf '  %sКаталог проекта: %s — это веб-корень (www), запускайте уровнем выше%s\n' "$C_RED" "$(pwd -P)" "$C_NC"
+    elif fn_is_home_dir; then printf '  %sКаталог проекта: %s — это домашний каталог, запускайте из корня проекта%s\n' "$C_YELLOW" "$(pwd -P)" "$C_NC"
     else printf '  %sКаталог проекта:%s %s\n' "$C_DIM" "$C_NC" "$(pwd -P)"; fi
     echo
 }
@@ -125,7 +126,20 @@ fn_is_home_dir() {   # /, /root, /home/<user>, $HOME — не каталог п�
     [ "$d" = "/" ] || [ "$d" = "/root" ] || [ "$d" = "${HOME:-/root}" ] || [[ "$d" =~ ^/home/[^/]+/?$ ]] || [ "$d" = "/tmp" ]
 }
 
+fn_is_web_root() {   # веб-корень (www, public_html, htdocs, public) — сюда ничего служебного класть нельзя
+    local d; d=$(pwd -P)
+    [[ "$d" =~ (^|/)(www|public_html|htdocs|public|web)(/|$) ]] || [ -f "$d/bitrix/php_interface/dbconn.php" ] || [ -d "$d/bitrix/modules" ]
+}
+
 fn_require_project_dir() {   # DevKit привязывает Claude к проекту по текущему каталогу — запуск должен быть из него
+    if fn_is_web_root && ! $OPT_YES; then
+        echo
+        err "Вы в каталоге $(pwd -P) — это веб-корень сайта (www)."
+        info "Claude, DevKit и служебные каталоги (.claude, claude_docs, .example) нельзя размещать внутри www — они станут доступны из интернета."
+        info "Запускайте из корня проекта уровнем выше:"
+        printf '   %scd %s && bash %s%s\n' "$C_BOLD" "$(dirname "$(pwd -P)")" "$(basename "$0")" "$C_NC"
+        exit 1
+    fi
     if fn_is_home_dir && ! $OPT_YES; then
         echo
         err "Вы в каталоге $(pwd -P) — это домашний каталог, а не проект."
