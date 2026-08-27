@@ -282,17 +282,33 @@ fn_proxy_read_existing() {   # уже настроенный proxychains → п�
 
 fn_urlenc() { python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 
+fn_curl_clean() {   # curl БЕЗ унаследованного прокси: env-переменные (*_proxy), ~/.curlrc (-q первым), LD_PRELOAD от proxychains.
+    # Без этого «прямая» проверка может уйти через тот самый прокси и показать доступ там, где его нет.
+    env -u LD_PRELOAD -u PROXYCHAINS_CONF_FILE -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u NO_PROXY -u no_proxy \
+        curl -q --noproxy '*' "$@"
+}
+fn_proxychains_global() {   # proxychains навешен на все процессы через /etc/ld.so.preload → «напрямую» проверить нечем
+    grep -qs proxychains /etc/ld.so.preload
+}
 fn_direct_test() {   # без прокси: доступен ли claude.ai напрямую (нативный установщик)
-    local code; code=$(curl -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
+    local code; code=$(fn_curl_clean -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
+    echo "$(date '+%F %T') claude.ai/install.sh напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
     if [ "$code" = "200" ]; then NATIVE_OK=true; else NATIVE_OK=false; info "${C_DIM}claude.ai напрямую закрыт — Claude поставим через npm${C_NC}"; fi
 }
 API_DIRECT=""   # кэш ответа api.anthropic.com: yes | no (проверяем один раз за запуск)
-fn_api_direct_ok() {   # работает ли сам API Anthropic напрямую: 401 = дошли до API (ключ фиктивный), 403/таймаут = регион/сеть закрыты
+fn_api_direct_ok() {   # работает ли сам API Anthropic напрямую: 401/400 С ТЕЛОМ ОШИБКИ Anthropic = дошли до API (ключ фиктивный).
+    # Только код ответа доверять нельзя: 401 умеет отдать и корпоративный прокси, и перехватчик TLS, и заглушка провайдера.
     if [ -z "$API_DIRECT" ]; then
-        local code; code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 12 -X POST https://api.anthropic.com/v1/messages \
-            -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
-        echo "$(date '+%F %T') api.anthropic.com напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
-        if [ "$code" = "401" ] || [ "$code" = "400" ]; then API_DIRECT=yes; else API_DIRECT=no; fi
+        if fn_proxychains_global; then
+            API_DIRECT=no; echo "$(date '+%F %T') proxychains в /etc/ld.so.preload — прямой доступ проверить нельзя, считаем закрытым" >> "$LOG"
+        else
+            local body code; body=$(mktemp)
+            code=$(fn_curl_clean -sS -o "$body" -w '%{http_code}' --connect-timeout 5 --max-time 12 -X POST https://api.anthropic.com/v1/messages \
+                -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
+            if { [ "$code" = "401" ] || [ "$code" = "400" ]; } && grep -qE '"type" *: *"(authentication_error|invalid_request_error)"' "$body"; then API_DIRECT=yes; else API_DIRECT=no; fi
+            echo "$(date '+%F %T') api.anthropic.com напрямую: HTTP ${code:-нет ответа}, ответ API: $API_DIRECT ($(head -c 120 "$body" 2>/dev/null | tr -d '\n'))" >> "$LOG"
+            rm -f "$body"
+        fi
     fi
     [ "$API_DIRECT" = yes ]
 }
@@ -314,7 +330,7 @@ NET_CACHE=$(mktemp -d /tmp/mw-install-net.XXXXXX); TMP_DIRS+=("$NET_CACHE")
 fn_net_prefix() {   # $1 = URL → печатает "" (напрямую) или "$PREFIX"; проверка лёгкая (первый байт по range / HEAD), кэш в файле — работает и из $(…)
     local url="$1" host; host=$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/]+).*#\1#'); local c="$NET_CACHE/$host"
     if [ ! -f "$c" ]; then
-        if curl -fsS -o /dev/null --range 0-0 --connect-timeout 6 --max-time 15 "$url" 2>>"$LOG" || curl -fsSI -o /dev/null --connect-timeout 6 --max-time 15 "$url" 2>>"$LOG"; then echo yes > "$c"; echo "$(date '+%F %T') $host: доступен напрямую" >> "$LOG"
+        if fn_curl_clean -fsS -o /dev/null --range 0-0 --connect-timeout 6 --max-time 15 "$url" 2>>"$LOG" || fn_curl_clean -fsSI -o /dev/null --connect-timeout 6 --max-time 15 "$url" 2>>"$LOG"; then echo yes > "$c"; echo "$(date '+%F %T') $host: доступен напрямую" >> "$LOG"
         else echo no > "$c"; echo "$(date '+%F %T') $host: напрямую недоступен → через прокси" >> "$LOG"; fi
     fi
     [ "$(cat "$c")" = yes ] && echo "" || echo "$PREFIX"
@@ -330,7 +346,7 @@ fn_npm_cmd() {   # $1 = путь к npm, остальное — аргумент
     else printf "%s'%s' %s" "$PREFIX" "$npm_bin" "$*"; fi
 }
 
-fn_adflow_direct() { curl -fsS -o /dev/null --connect-timeout 8 --max-time 20 "$ADFLOW_URL/devkit/install.sh" 2>>"$LOG"; }
+fn_adflow_direct() { fn_curl_clean -fsS -o /dev/null --connect-timeout 8 --max-time 20 "$ADFLOW_URL/devkit/install.sh" 2>>"$LOG"; }
 
 fn_ensure_adflow_cli() {   # adflow ставится напрямую с AdFlow (прокси не нужен)
     [ -x /usr/local/bin/adflow ] && return 0
@@ -358,15 +374,18 @@ fn_proxy_from_adflow() {   # параметры SOCKS5 из AdFlow по личн
 fn_setup_proxy() {
     step "Сеть"
     command -v curl >/dev/null 2>&1 || fn_prepare_minimal
+    if [ -n "${LD_PRELOAD:-}${ALL_PROXY:-}${HTTPS_PROXY:-}${https_proxy:-}" ] || [ -s "$HOME/.curlrc" ]; then
+        info "${C_DIM}установщик запущен с прокси в окружении — прямую доступность проверяю без него${C_NC}"
+    fi
     if [ "$OPT_PROXY" = "none" ]; then USE_PROXY_FLAG=false; PREFIX=""; ok "Прямое соединение (--no-proxy)."; fn_direct_test; return 0; fi
     if [ "$OPT_PROXY" = "adflow" ]; then fn_proxy_from_adflow || { err "Не удалось получить прокси из AdFlow"; exit 1; }
     elif [ -n "$OPT_PROXY" ]; then
         PROXY_IP=$(echo "$OPT_PROXY" | cut -d: -f1); PROXY_PORT=$(echo "$OPT_PROXY" | cut -d: -s -f2); PROXY_PASS=$(echo "$OPT_PROXY" | cut -d: -s -f3-)
-    elif fn_api_direct_ok; then   # сервер вне РФ (или прокси уже в сети): API открыт напрямую — прокси не нужен, даже если он прописан в proxychains
-        ok "API Anthropic открыт напрямую — прокси не нужен"
+    elif fn_api_direct_ok && { fn_direct_test; $NATIVE_OK; }; then   # и api.anthropic.com, и claude.ai открыты напрямую (claude.ai нужен для `claude /login`)
+        ok "API Anthropic и claude.ai открыты напрямую — прокси не нужен"
         if fn_proxy_read_existing; then info "${C_DIM}настроенный прокси ${PROXY_IP}:${PROXY_PORT} не используется (конфиг не трогаю)${C_NC}"; fi
-        PROXY_IP=""; PROXY_PASS=""; USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0
-    elif fn_proxy_read_existing; then   # API напрямую закрыт, а прокси уже настроен: молча проверяем; вопрос — только если он не работает
+        PROXY_IP=""; PROXY_PASS=""; USE_PROXY_FLAG=false; PREFIX=""; return 0
+    elif fn_proxy_read_existing; then   # напрямую доступно не всё (API или claude.ai закрыт), а прокси уже настроен: молча проверяем; вопрос — только если он не работает
         info "Прокси ${PROXY_IP}:${PROXY_PORT} уже настроен, проверяю…"
         if fn_proxy_test; then fn_proxy_finish; return 0; fi
         warn "прокси ${PROXY_IP}:${PROXY_PORT} не отвечает"
@@ -374,7 +393,6 @@ fn_setup_proxy() {
         case "$CHOSEN" in 2) USE_PROXY_FLAG=false; PREFIX=""; PROXY_IP=""; PROXY_PASS=""; fn_direct_test; return 0;; esac; PROXY_IP=""
     fi
     if [ -z "$PROXY_IP" ] && [ "$OPT_PROXY" != "none" ]; then
-        if fn_api_direct_ok; then ok "API Anthropic открыт напрямую — прокси не нужен"; fn_direct_test; USE_PROXY_FLAG=false; PREFIX=""; return 0; fi
         if fn_adflow_direct; then
             choose "claude.ai отсюда не открывается. Прокси:" 1 "Взять из AdFlow (после входа в DevKit)" "Ввести вручную" "Работать без прокси"
             case "$CHOSEN" in 1) fn_proxy_from_adflow || warn "не получилось — введите вручную";; 3) USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0;; esac
