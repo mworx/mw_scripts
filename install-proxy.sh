@@ -287,48 +287,21 @@ fn_curl_clean() {   # curl БЕЗ унаследованного прокси: e
     env -u LD_PRELOAD -u PROXYCHAINS_CONF_FILE -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u NO_PROXY -u no_proxy \
         curl -q --noproxy '*' "$@"
 }
-fn_proxychains_global() {   # proxychains навешен на все процессы через /etc/ld.so.preload → «напрямую» проверить нечем
-    grep -qs proxychains /etc/ld.so.preload
-}
-fn_proxy_ip_from_conf() {   # IP прокси из конфига proxychains — без побочных эффектов (PROXY_* не трогаем)
-    local f; f=$(ls /etc/proxychains4.conf /etc/proxychains.conf 2>/dev/null | head -n 1); [ -f "$f" ] || return 1
-    local ip; ip=$(grep -E '^[[:space:]]*socks[45][[:space:]]' "$f" 2>/dev/null | tail -n 1 | awk '{print $2}'); [ -n "$ip" ] && echo "$ip"
-}
-fn_external_ip() {   # каким IP нас видит интернет
-    fn_curl_clean -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>>"$LOG" || fn_curl_clean -fsS --connect-timeout 5 --max-time 10 https://ifconfig.me 2>>"$LOG"
-}
 fn_direct_test() {   # без прокси: доступен ли claude.ai напрямую (нативный установщик)
     local code; code=$(fn_curl_clean -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
     echo "$(date '+%F %T') claude.ai/install.sh напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
     if [ "$code" = "200" ]; then NATIVE_OK=true; else NATIVE_OK=false; info "${C_DIM}claude.ai напрямую закрыт — Claude поставим через npm${C_NC}"; fi
 }
 API_DIRECT=""   # кэш ответа api.anthropic.com: yes | no (проверяем один раз за запуск)
-fn_api_direct_ok() {   # работает ли сам API Anthropic напрямую: 401/400 С ТЕЛОМ ОШИБКИ Anthropic = дошли до API (ключ фиктивный).
-    # Только код ответа доверять нельзя: 401 умеет отдать и корпоративный прокси, и перехватчик TLS, и заглушка провайдера.
+fn_api_direct_ok() {   # доступен ли api.anthropic.com из этого окружения: 401/400 с телом ошибки Anthropic = дошли до API (ключ фиктивный).
+    # Тело смотрим потому, что голый 401 умеет отдать и перехватчик TLS, и заглушка провайдера.
     if [ -z "$API_DIRECT" ]; then
-        if fn_proxychains_global; then
-            API_DIRECT=no; echo "$(date '+%F %T') proxychains в /etc/ld.so.preload — прямой доступ проверить нельзя, считаем закрытым" >> "$LOG"
-        else
-            local body code; body=$(mktemp)
-            code=$(fn_curl_clean -sS -o "$body" -w '%{http_code}' --connect-timeout 5 --max-time 12 -X POST https://api.anthropic.com/v1/messages \
-                -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
-            if { [ "$code" = "401" ] || [ "$code" = "400" ]; } && grep -qE '"type" *: *"(authentication_error|invalid_request_error)"' "$body"; then API_DIRECT=yes; else API_DIRECT=no; fi
-            echo "$(date '+%F %T') api.anthropic.com напрямую: HTTP ${code:-нет ответа}, ответ API: $API_DIRECT ($(head -c 120 "$body" 2>/dev/null | tr -d '\n'))" >> "$LOG"
-            rm -f "$body"
-            # Прозрачное проксирование (iptables REDIRECT / redsocks): очисткой окружения не ловится, но виден внешний IP —
-            # если он совпал с прокси из конфига, «прямого» доступа нет, трафик и так заворачивается на прокси.
-            if [ "$API_DIRECT" = yes ]; then
-                local pip eip; pip=$(fn_proxy_ip_from_conf || true)
-                if [ -n "$pip" ]; then
-                    eip=$(fn_external_ip || true)
-                    echo "$(date '+%F %T') внешний IP: ${eip:-неизвестен} (прокси в конфиге: $pip)" >> "$LOG"
-                    if [ -n "$eip" ] && [ "$eip" = "$pip" ]; then
-                        API_DIRECT=no
-                        info "${C_DIM}внешний IP совпадает с прокси ${pip} — трафик и так идёт через него${C_NC}"
-                    fi
-                fi
-            fi
-        fi
+        local body code; body=$(mktemp)
+        code=$(fn_curl_clean -sS -o "$body" -w '%{http_code}' --connect-timeout 5 --max-time 12 -X POST https://api.anthropic.com/v1/messages \
+            -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
+        if { [ "$code" = "401" ] || [ "$code" = "400" ]; } && grep -qE '"type" *: *"(authentication_error|invalid_request_error)"' "$body"; then API_DIRECT=yes; else API_DIRECT=no; fi
+        echo "$(date '+%F %T') api.anthropic.com без proxychains: HTTP ${code:-нет ответа} → $API_DIRECT" >> "$LOG"
+        rm -f "$body"
     fi
     [ "$API_DIRECT" = yes ]
 }
@@ -454,9 +427,15 @@ fn_proxy_finish() {   # прокси проверен: proxychains, конфиг
     done
 }
 fn_proxychains_conf_text() { printf '# %s: настройки прокси для Claude Code (без proxy_dns — с ним Claude виснет)\nstrict_chain\nquiet_mode\nremote_dns_subnet 224\ntcp_read_time_out 15000\ntcp_connect_time_out 8000\n[ProxyList]\nsocks5 %s %s %s %s\n' "$MARK" "$PROXY_IP" "$PROXY_PORT" "$PROXY_USER" "$PROXY_PASS"; }
-fn_write_proxychains_conf() {   # $1 файл $2 владелец: пишет без eval; чужой (не наш) конфиг — бэкап; не меняется — не трогаем
+fn_conf_usable() {   # $1 файл: конфиг уже годится — тот же прокси и нет proxy_dns (из-за него Claude виснет). Тогда не трогаем чужую настройку.
+    [ -f "$1" ] || return 1
+    grep -qE "^[[:space:]]*socks[45][[:space:]]+$PROXY_IP[[:space:]]+$PROXY_PORT([[:space:]]|$)" "$1" 2>/dev/null || return 1
+    ! grep -qE '^[[:space:]]*proxy_dns([[:space:]]|$)' "$1" 2>/dev/null
+}
+fn_write_proxychains_conf() {   # $1 файл $2 владелец: пишет без eval; чужой (не наш) конфиг — бэкап; годится как есть или не меняется — не трогаем
     local f="$1" u="$2" new; new=$(fn_proxychains_conf_text)
     if [ -f "$f" ] && [ "$(cat "$f" 2>/dev/null)" = "$new" ]; then return 0; fi
+    if fn_conf_usable "$f"; then info "${C_DIM}$f уже настроен на ${PROXY_IP}:${PROXY_PORT} — оставляю как есть${C_NC}"; return 0; fi
     $OPT_DRY && { echo "   ${C_DIM}[dry-run] записать $f (socks5 $PROXY_IP $PROXY_PORT $PROXY_USER ***)${C_NC}"; return 0; }
     if [ -f "$f" ] && ! grep -q "$MARK" "$f"; then cp -p "$f" "$f.bak.$TS"; info "${C_DIM}прежний $f сохранён как $f.bak.$TS${C_NC}"; fi
     mkdir -p "$(dirname "$f")" && printf '%s\n' "$new" > "$f" && chmod 600 "$f" && chown "$u:" "$f" "$(dirname "$f")" 2>/dev/null
