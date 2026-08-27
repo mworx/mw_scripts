@@ -290,6 +290,13 @@ fn_curl_clean() {   # curl БЕЗ унаследованного прокси: e
 fn_proxychains_global() {   # proxychains навешен на все процессы через /etc/ld.so.preload → «напрямую» проверить нечем
     grep -qs proxychains /etc/ld.so.preload
 }
+fn_proxy_ip_from_conf() {   # IP прокси из конфига proxychains — без побочных эффектов (PROXY_* не трогаем)
+    local f; f=$(ls /etc/proxychains4.conf /etc/proxychains.conf 2>/dev/null | head -n 1); [ -f "$f" ] || return 1
+    local ip; ip=$(grep -E '^[[:space:]]*socks[45][[:space:]]' "$f" 2>/dev/null | tail -n 1 | awk '{print $2}'); [ -n "$ip" ] && echo "$ip"
+}
+fn_external_ip() {   # каким IP нас видит интернет
+    fn_curl_clean -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>>"$LOG" || fn_curl_clean -fsS --connect-timeout 5 --max-time 10 https://ifconfig.me 2>>"$LOG"
+}
 fn_direct_test() {   # без прокси: доступен ли claude.ai напрямую (нативный установщик)
     local code; code=$(fn_curl_clean -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
     echo "$(date '+%F %T') claude.ai/install.sh напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
@@ -308,6 +315,19 @@ fn_api_direct_ok() {   # работает ли сам API Anthropic напрям
             if { [ "$code" = "401" ] || [ "$code" = "400" ]; } && grep -qE '"type" *: *"(authentication_error|invalid_request_error)"' "$body"; then API_DIRECT=yes; else API_DIRECT=no; fi
             echo "$(date '+%F %T') api.anthropic.com напрямую: HTTP ${code:-нет ответа}, ответ API: $API_DIRECT ($(head -c 120 "$body" 2>/dev/null | tr -d '\n'))" >> "$LOG"
             rm -f "$body"
+            # Прозрачное проксирование (iptables REDIRECT / redsocks): очисткой окружения не ловится, но виден внешний IP —
+            # если он совпал с прокси из конфига, «прямого» доступа нет, трафик и так заворачивается на прокси.
+            if [ "$API_DIRECT" = yes ]; then
+                local pip eip; pip=$(fn_proxy_ip_from_conf || true)
+                if [ -n "$pip" ]; then
+                    eip=$(fn_external_ip || true)
+                    echo "$(date '+%F %T') внешний IP: ${eip:-неизвестен} (прокси в конфиге: $pip)" >> "$LOG"
+                    if [ -n "$eip" ] && [ "$eip" = "$pip" ]; then
+                        API_DIRECT=no
+                        info "${C_DIM}внешний IP совпадает с прокси ${pip} — трафик и так идёт через него${C_NC}"
+                    fi
+                fi
+            fi
         fi
     fi
     [ "$API_DIRECT" = yes ]
