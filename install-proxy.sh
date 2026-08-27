@@ -286,11 +286,15 @@ fn_direct_test() {   # без прокси: доступен ли claude.ai на
     local code; code=$(curl -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
     if [ "$code" = "200" ]; then NATIVE_OK=true; else NATIVE_OK=false; info "${C_DIM}claude.ai напрямую закрыт — Claude поставим через npm${C_NC}"; fi
 }
+API_DIRECT=""   # кэш ответа api.anthropic.com: yes | no (проверяем один раз за запуск)
 fn_api_direct_ok() {   # работает ли сам API Anthropic напрямую: 401 = дошли до API (ключ фиктивный), 403/таймаут = регион/сеть закрыты
-    local code; code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 -X POST https://api.anthropic.com/v1/messages \
-        -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
-    echo "$(date '+%F %T') api.anthropic.com напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
-    [ "$code" = "401" ] || [ "$code" = "400" ]
+    if [ -z "$API_DIRECT" ]; then
+        local code; code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 12 -X POST https://api.anthropic.com/v1/messages \
+            -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
+        echo "$(date '+%F %T') api.anthropic.com напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
+        if [ "$code" = "401" ] || [ "$code" = "400" ]; then API_DIRECT=yes; else API_DIRECT=no; fi
+    fi
+    [ "$API_DIRECT" = yes ]
 }
 
 fn_curl_px() {   # curl через SOCKS5 с кредами из stdin-конфига (пароль не светится в ps); остальные аргументы — как у curl
@@ -358,12 +362,16 @@ fn_setup_proxy() {
     if [ "$OPT_PROXY" = "adflow" ]; then fn_proxy_from_adflow || { err "Не удалось получить прокси из AdFlow"; exit 1; }
     elif [ -n "$OPT_PROXY" ]; then
         PROXY_IP=$(echo "$OPT_PROXY" | cut -d: -f1); PROXY_PORT=$(echo "$OPT_PROXY" | cut -d: -s -f2); PROXY_PASS=$(echo "$OPT_PROXY" | cut -d: -s -f3-)
-    elif fn_proxy_read_existing; then   # прокси уже настроен: молча проверяем; вопрос — только если он не работает
+    elif fn_api_direct_ok; then   # сервер вне РФ (или прокси уже в сети): API открыт напрямую — прокси не нужен, даже если он прописан в proxychains
+        ok "API Anthropic открыт напрямую — прокси не нужен"
+        if fn_proxy_read_existing; then info "${C_DIM}настроенный прокси ${PROXY_IP}:${PROXY_PORT} не используется (конфиг не трогаю)${C_NC}"; fi
+        PROXY_IP=""; PROXY_PASS=""; USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0
+    elif fn_proxy_read_existing; then   # API напрямую закрыт, а прокси уже настроен: молча проверяем; вопрос — только если он не работает
         info "Прокси ${PROXY_IP}:${PROXY_PORT} уже настроен, проверяю…"
         if fn_proxy_test; then fn_proxy_finish; return 0; fi
         warn "прокси ${PROXY_IP}:${PROXY_PORT} не отвечает"
         choose "Сеть:" 1 "Настроить прокси заново" "Работать без прокси"
-        case "$CHOSEN" in 2) USE_PROXY_FLAG=false; PREFIX=""; fn_direct_test; return 0;; esac; PROXY_IP=""
+        case "$CHOSEN" in 2) USE_PROXY_FLAG=false; PREFIX=""; PROXY_IP=""; PROXY_PASS=""; fn_direct_test; return 0;; esac; PROXY_IP=""
     fi
     if [ -z "$PROXY_IP" ] && [ "$OPT_PROXY" != "none" ]; then
         if fn_api_direct_ok; then ok "API Anthropic открыт напрямую — прокси не нужен"; fn_direct_test; USE_PROXY_FLAG=false; PREFIX=""; return 0; fi
