@@ -441,9 +441,11 @@ fn_proxy_finish() {   # прокси проверен: proxychains, конфиг
     done
 }
 fn_proxychains_conf_text() { printf '# %s: настройки прокси для Claude Code (без proxy_dns — с ним Claude виснет)\nstrict_chain\nquiet_mode\nremote_dns_subnet 224\ntcp_read_time_out 15000\ntcp_connect_time_out 8000\n[ProxyList]\nsocks5 %s %s %s %s\n' "$MARK" "$PROXY_IP" "$PROXY_PORT" "$PROXY_USER" "$PROXY_PASS"; }
-fn_conf_usable() {   # $1 файл: конфиг уже годится — тот же прокси и нет proxy_dns (из-за него Claude виснет). Тогда не трогаем чужую настройку.
+fn_conf_usable() {   # $1 файл: конфиг уже годится — тот же прокси, без proxy_dns (Claude с ним виснет) и с quiet_mode
+    # (без него каждая команда под proxychains печатает «[proxychains] DLL init» — мусор в выводе и в контексте Claude).
     [ -f "$1" ] || return 1
     grep -qE "^[[:space:]]*socks[45][[:space:]]+$PROXY_IP[[:space:]]+$PROXY_PORT([[:space:]]|$)" "$1" 2>/dev/null || return 1
+    grep -qE '^[[:space:]]*quiet_mode([[:space:]]|$)' "$1" 2>/dev/null || return 1
     ! grep -qE '^[[:space:]]*proxy_dns([[:space:]]|$)' "$1" 2>/dev/null
 }
 fn_write_proxychains_conf() {   # $1 файл $2 владелец: пишет без eval; чужой (не наш) конфиг — бэкап; годится как есть или не меняется — не трогаем
