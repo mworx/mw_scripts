@@ -288,8 +288,9 @@ fn_curl_clean() {   # curl БЕЗ унаследованного прокси: e
         curl -q --noproxy '*' "$@"
 }
 fn_direct_test() {   # без прокси: доступен ли claude.ai напрямую (нативный установщик)
-    local code; code=$(fn_curl_clean -sSL -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
-    echo "$(date '+%F %T') claude.ai/install.sh напрямую: HTTP ${code:-нет ответа}" >> "$LOG"
+    local r; r=$(fn_curl_clean -sSL -o /dev/null -w '%{http_code} %{remote_ip}' --connect-timeout 10 --max-time 25 https://claude.ai/install.sh 2>>"$LOG")
+    local code="${r%% *}"
+    echo "$(date '+%F %T') claude.ai/install.sh без proxychains: HTTP ${r:-нет ответа}" >> "$LOG"
     if [ "$code" = "200" ]; then NATIVE_OK=true; else NATIVE_OK=false; info "${C_DIM}claude.ai напрямую закрыт — Claude поставим через npm${C_NC}"; fi
 }
 API_DIRECT=""   # кэш ответа api.anthropic.com: yes | no (проверяем один раз за запуск)
@@ -297,10 +298,10 @@ fn_api_direct_ok() {   # доступен ли api.anthropic.com из этого
     # Тело смотрим потому, что голый 401 умеет отдать и перехватчик TLS, и заглушка провайдера.
     if [ -z "$API_DIRECT" ]; then
         local body code; body=$(mktemp)
-        code=$(fn_curl_clean -sS -o "$body" -w '%{http_code}' --connect-timeout 5 --max-time 12 -X POST https://api.anthropic.com/v1/messages \
-            -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG")
+        local r; r=$(fn_curl_clean -sS -o "$body" -w '%{http_code} %{remote_ip}' --connect-timeout 5 --max-time 12 -X POST https://api.anthropic.com/v1/messages \
+            -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>>"$LOG"); code="${r%% *}"
         if { [ "$code" = "401" ] || [ "$code" = "400" ]; } && grep -qE '"type" *: *"(authentication_error|invalid_request_error)"' "$body"; then API_DIRECT=yes; else API_DIRECT=no; fi
-        echo "$(date '+%F %T') api.anthropic.com без proxychains: HTTP ${code:-нет ответа} → $API_DIRECT" >> "$LOG"
+        echo "$(date '+%F %T') api.anthropic.com без proxychains: HTTP ${r:-нет ответа} → $API_DIRECT" >> "$LOG"
         rm -f "$body"
     fi
     [ "$API_DIRECT" = yes ]
@@ -374,9 +375,22 @@ fn_setup_proxy() {
     if [ "$OPT_PROXY" = "adflow" ]; then fn_proxy_from_adflow || { err "Не удалось получить прокси из AdFlow"; exit 1; }
     elif [ -n "$OPT_PROXY" ]; then
         PROXY_IP=$(echo "$OPT_PROXY" | cut -d: -f1); PROXY_PORT=$(echo "$OPT_PROXY" | cut -d: -s -f2); PROXY_PASS=$(echo "$OPT_PROXY" | cut -d: -s -f3-)
-    elif fn_api_direct_ok && { fn_direct_test; $NATIVE_OK; }; then   # и api.anthropic.com, и claude.ai открыты напрямую (claude.ai нужен для `claude /login`)
-        ok "API Anthropic и claude.ai открыты напрямую — прокси не нужен"
-        if fn_proxy_read_existing; then info "${C_DIM}настроенный прокси ${PROXY_IP}:${PROXY_PORT} не используется (конфиг не трогаю)${C_NC}"; fi
+    elif fn_api_direct_ok && { fn_direct_test; $NATIVE_OK; }; then   # и api.anthropic.com, и claude.ai отвечают без proxychains (claude.ai нужен для `claude /login`)
+        if fn_proxy_read_existing; then
+            # Связность — не единственная причина прокси: с ним у Anthropic видно зарубежный IP. Решает владелец сервера;
+            # по умолчанию (и в неинтерактивном режиме) остаёмся на прокси, который на сервере уже настроен.
+            choose "Anthropic отвечает и напрямую, и через настроенный прокси ${PROXY_IP}:${PROXY_PORT}. Как ходить?" 1 \
+                   "Через прокси — как настроено на сервере (зарубежный IP)" \
+                   "Напрямую — быстрее, но Anthropic видит IP сервера"
+            if [ "$CHOSEN" = "1" ]; then
+                if fn_proxy_test; then fn_proxy_finish; return 0; fi
+                warn "прокси ${PROXY_IP}:${PROXY_PORT} не отвечает — работаем напрямую"
+            else
+                info "${C_DIM}идём напрямую, конфиг прокси не трогаю${C_NC}"
+            fi
+        else
+            ok "API Anthropic и claude.ai открыты напрямую — прокси не нужен"
+        fi
         PROXY_IP=""; PROXY_PASS=""; USE_PROXY_FLAG=false; PREFIX=""; return 0
     elif fn_proxy_read_existing; then   # напрямую доступно не всё (API или claude.ai закрыт), а прокси уже настроен: молча проверяем; вопрос — только если он не работает
         info "Прокси ${PROXY_IP}:${PROXY_PORT} уже настроен, проверяю…"
