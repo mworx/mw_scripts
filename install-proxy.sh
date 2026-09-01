@@ -14,7 +14,7 @@ set -o pipefail
 ADFLOW_URL="${ADFLOW_URL:-https://adflow.mworx.ru/api/v1}"
 NODE_DIR="/opt/vibe-node"; NODE_VER="v22.23.2"; NODE_MAJOR=22; DEMO_DIR="/opt/vibe-demo"   # Claude Code ≥ 2.1.246 требует Node ≥ 22; для CentOS 7 есть сборка glibc-217
 PKG_MANAGER=""; OS_ID=""; OS_VERSION=""
-PROXY_IP=""; PROXY_PORT=""; PROXY_USER="proxyuser"; PROXY_PASS=""; PROXYCHAINS_CONF_FILE=""
+PROXY_IP=""; PROXY_PORT=""; PROXY_USER="proxyuser"; PROXY_PASS=""; PROXYCHAINS_CONF_FILE=""; PROXY_LIST=""; PROXY_LABEL=""
 USE_PROXY_FLAG=false; PREFIX=""
 OPT_PROFILE=""; OPT_PROXY=""; OPT_YES=false; OPT_DRY=false; OPT_KEEP_LEGACY=false; OPT_DOMAIN=""; OPT_DBPASS=""; OPT_ALL_USERS=false; OPT_FORCE_DIR=false
 LOG="/var/log/mw-install.log"
@@ -351,7 +351,7 @@ fn_fetch_adflow_cli() {   # скачать во временный файл, п�
     local t; t=$(mktemp); spin "Утилита adflow" "curl -fsSL --max-time 60 '$ADFLOW_URL/devkit/cli' -o '$t' && python3 -m py_compile '$t' && install -m 755 '$t' /usr/local/bin/adflow"; local rc=$?; rm -f "$t" "${t}c" 2>/dev/null; return $rc
 }
 
-fn_proxy_from_adflow() {   # параметры SOCKS5 из AdFlow по личному ключу → PROXY_*; 0 — получены
+fn_proxy_from_adflow() {   # параметры SOCKS5 из AdFlow по личному ключу → PROXY_* (первый) и PROXY_LIST (все); 0 — получены
     fn_ensure_adflow_cli || return 1
     if [ -z "${ADFLOW_DEV_KEY:-}" ] && [ ! -s /root/.config/mw-devkit/key ]; then
         info "${C_DIM}настройки сети хранятся в AdFlow и выдаются после входа в DevKit${C_NC}"
@@ -360,9 +360,52 @@ fn_proxy_from_adflow() {   # параметры SOCKS5 из AdFlow по личн
     fi
     local js; js=$(adflow proxy 2>>"$LOG") || return 1
     [ "$(echo "$js" | fn_json configured)" = "True" ] || { warn "в AdFlow прокси не настроен (devkit.proxy)"; return 1; }
-    PROXY_IP=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin)["host"])'); PROXY_PORT=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin)["port"])')
-    PROXY_USER=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("user") or "proxyuser")'); PROXY_PASS=$(echo "$js" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("pass") or "")')
-    ok "Параметры прокси получены из AdFlow: ${PROXY_IP}:${PROXY_PORT}"
+    # items — список с резервами (AdFlow ≥ 2026-09-01); старый ответ без items читаем как один прокси
+    PROXY_LIST=$(echo "$js" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+items = d.get("items") or [{k: d.get(k) for k in ("host", "port", "user", "pass")}]
+for i in items:
+    if i.get("host"):
+        print("\t".join([str(i.get(k) or "") for k in ("host", "port", "user", "pass", "label")]))
+')
+    [ -n "$PROXY_LIST" ] || { warn "AdFlow не вернул ни одного прокси"; return 1; }
+    fn_proxy_take "$(echo "$PROXY_LIST" | head -1)"
+    local n; n=$(echo "$PROXY_LIST" | wc -l)
+    ok "Параметры прокси получены из AdFlow: ${PROXY_IP}:${PROXY_PORT}$([ "$n" -gt 1 ] && echo " (+$((n-1)) резервных)")"
+}
+
+fn_proxy_take() {   # строка "host\tport\tuser\tpass\tlabel" → PROXY_*
+    IFS=$'\t' read -r PROXY_IP PROXY_PORT PROXY_USER PROXY_PASS PROXY_LABEL <<<"$1"
+    [ -z "$PROXY_PORT" ] && PROXY_PORT=1080
+    [ -z "$PROXY_USER" ] && PROXY_USER=proxyuser
+}
+
+fn_tcp_open() {   # 0 — TCP до $1:$2 встал. Отделяет «порт закрыт» от «прокси не принял пароль»: до SOCKS дело не доходит
+    timeout "${3:-8}" bash -c "cat < /dev/null > /dev/tcp/$1/$2" 2>/dev/null
+}
+
+fn_proxy_why() {   # человеческая причина отказа: писать «проверьте пароль», когда не встал даже TCP, — вредный совет
+    if ! fn_tcp_open "$PROXY_IP" "$PROXY_PORT" 8; then
+        echo "порт ${PROXY_IP}:${PROXY_PORT} не отвечает — прокси выключен или закрыт файрволом (логин и пароль здесь ни при чём)"
+    elif ! fn_curl_px -sS -o /dev/null --connect-timeout 10 --max-time 20 https://registry.npmjs.org/-/ping 2>>"$LOG"; then
+        echo "прокси ${PROXY_IP}:${PROXY_PORT} отвечает, но соединение не проходит — обычно неверный логин/пароль или прокси не выпускает наружу"
+    else
+        echo "прокси ${PROXY_IP}:${PROXY_PORT} работает, но claude.ai и registry.npmjs.org через него не открылись"
+    fi
+}
+
+fn_proxy_pick() {   # перебор PROXY_LIST: берём первый живой. Один упавший прокси не должен останавливать установку
+    local line first=true
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        fn_proxy_take "$line"
+        $first || info "Пробую резервный прокси ${PROXY_IP}:${PROXY_PORT}${PROXY_LABEL:+ ($PROXY_LABEL)}…"
+        first=false
+        if fn_proxy_test; then return 0; fi
+        warn "$(fn_proxy_why)"
+    done <<<"$PROXY_LIST"
+    return 1
 }
 
 fn_setup_proxy() {
@@ -384,7 +427,7 @@ fn_setup_proxy() {
                    "Напрямую — быстрее, но Anthropic видит IP сервера"
             if [ "$CHOSEN" = "1" ]; then
                 if fn_proxy_test; then fn_proxy_finish; return 0; fi
-                warn "прокси ${PROXY_IP}:${PROXY_PORT} не отвечает — работаем напрямую"
+                warn "$(fn_proxy_why) — работаем напрямую"
             else
                 info "${C_DIM}идём напрямую, конфиг прокси не трогаю${C_NC}"
             fi
@@ -395,7 +438,7 @@ fn_setup_proxy() {
     elif fn_proxy_read_existing; then   # напрямую доступно не всё (API или claude.ai закрыт), а прокси уже настроен: молча проверяем; вопрос — только если он не работает
         info "Прокси ${PROXY_IP}:${PROXY_PORT} уже настроен, проверяю…"
         if fn_proxy_test; then fn_proxy_finish; return 0; fi
-        warn "прокси ${PROXY_IP}:${PROXY_PORT} не отвечает"
+        warn "$(fn_proxy_why)"
         choose "Сеть:" 1 "Настроить прокси заново" "Работать без прокси"
         case "$CHOSEN" in 2) USE_PROXY_FLAG=false; PREFIX=""; PROXY_IP=""; PROXY_PASS=""; fn_direct_test; return 0;; esac; PROXY_IP=""
     fi
@@ -415,7 +458,11 @@ fn_setup_proxy() {
     [ -z "$PROXY_PORT" ] && PROXY_PORT=1080
     case "$PROXY_PASS$PROXY_USER" in *[[:space:]]*) err "Логин/пароль прокси с пробелами proxychains не поддерживает."; exit 1;; esac
     info "Проверка прокси ${PROXY_IP}:${PROXY_PORT}…"
-    if fn_proxy_test; then :; else err "Через прокси не открываются ни claude.ai, ни registry.npmjs.org — проверьте IP/порт/пароль."; exit 1; fi
+    if [ -n "$PROXY_LIST" ]; then
+        fn_proxy_pick || { err "Ни один прокси из AdFlow не отвечает. Последняя причина: $(fn_proxy_why)"; err "Проверить и починить: AdFlow → Настройки → devkit.proxy; сам прокси-сервер — служба SOCKS и правила файрвола."; exit 1; }
+    elif ! fn_proxy_test; then
+        err "Прокси не пропустил запрос: $(fn_proxy_why)"; exit 1
+    fi
     fn_proxy_finish
 }
 fn_proxy_finish() {   # прокси проверен: proxychains, конфиги (свой и личные копии пользователям), флаги
